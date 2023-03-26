@@ -4,7 +4,7 @@
  * Tool to display available core and module upgrades for ProcessWire
  *
  * ProcessWire 
- * Copyright (C) 2021 by Ryan Cramer 
+ * Copyright (C) 2023 by Ryan Cramer 
  * Licensed under MPL 2.0
  * 
  * https://processwire.com
@@ -21,10 +21,10 @@ class ProcessWireUpgrade extends Process {
 		return array(
 			'title' => 'Upgrades', 
 			'summary' => 'Tool that helps you identify and install core and module upgrades.', 
-			'version' => 11, 
+			'version' => 12, 
 			'author' => 'Ryan Cramer', 
 			'installs' => 'ProcessWireUpgradeCheck', 
-			'requires' => 'ProcessWire>=3.0.0',
+			'requires' => 'ProcessWire>=3.0.178', 
 			'icon' => 'coffee'
 		); 
 	}
@@ -94,6 +94,10 @@ class ProcessWireUpgrade extends Process {
 		if(!$this->user->isSuperuser()) {
 			throw new WireException("This module requires superuser");
 		}
+		// https://github.com/ryancramerdesign/ProcessWireUpgrade/pull/16/commits/570fd1286e664a2689930862c679196f762af093
+		$ua = ini_get("user_agent");
+		if(empty($ua)) ini_set("user_agent", "PHP " . PHP_VERSION);
+		
 		set_time_limit(3600); 
 		$this->checker = $this->modules->getInstall('ProcessWireUpgradeCheck'); 
 		if(!$this->checker) {
@@ -552,7 +556,7 @@ class ProcessWireUpgrade extends Process {
 		
 		$oldHtaccessData = file_get_contents($rootTempPath . 'htaccess.txt');
 		$oldHtaccessVersion = preg_match('/@htaccessVersion\s+(\d+)/', $oldHtaccessData, $matches) ? (int) $matches[1] : 0;
-		$newHtaccessData = file_get_contents($rootPath . '.htaccess');
+		$newHtaccessData = file_exists($rootPath . '.htaccess') ? file_get_contents($rootPath . '.htaccess') : '';
 		$newHtaccessVersion = preg_match('/@htaccessVersion\s+(\d+)/', $newHtaccessData, $matches) ? (int) $matches[1] : 0;
 		$htaccessIsOk = $oldHtaccessVersion === $newHtaccessVersion;
 	
@@ -844,17 +848,19 @@ class ProcessWireUpgrade extends Process {
 			return $result; 
 		}
 	
-		$result = rename($old, $new); 	
+		//MP: files->rename() method will copy the files if rename fails, it will also log errors, since 3.0.178
+		$result = $this->wire()->files->rename($old, $new);
 
 		if($result) { 
 			$this->message("Renamed $_old => $_new"); 
+			$this->log("Renamed $old => $new");
 		} else {
 			$this->error("Unable to rename $_old => $_new"); 
 			if(basename(rtrim($new, '/')) == 'wire') {
 				throw new WireException("Upgrade aborted. Unable to rename $_old => $_new"); 
 			}
 		}
-
+		
 		return $result; 
 	}
 	
@@ -897,22 +903,31 @@ class ProcessWireUpgrade extends Process {
 	public function __destruct() {
 		if(!count($this->renames)) return;
 		//$rootPath = dirname(rtrim($this->wirePath, '/')) . '/'; 
+		$files = $this->wire()->files;
+
 		foreach($this->renames as $oldPath => $newPath) {
 			if(file_exists($newPath)) {	
 				$n = 0;
 				do { 
 					$newPath2 = $newPath . "-" . (++$n); 
 				} while(file_exists($newPath2)); 
-				if(rename($newPath, $newPath2)) {
+				$this->log("$newPath already exists, renaming it to $newPath2");
+				if($files->rename($newPath, $newPath2)) {
 					$this->message("Renamed $newPath => $newPath2");
 				}
 			}
 			$old = basename(rtrim($oldPath, '/')); 
 			$new = basename(rtrim($newPath, '/')); 
-			if(rename($oldPath, $newPath)) {
+			//MP: heads up: on windows, rename can fail with access denied if folder is locked, eg. explorer is opened in the directory
+			//MP: https://github.com/php/php-src/issues/7910
+			//MP: https://github.com/ryancramerdesign/ProcessWireUpgrade/issues/31#issuecomment-831190675
+			//MP: use $files->rename(), it will try to copy if rename fails, since 3.0.178
+			if($files->rename($oldPath, $newPath)) {
 				$this->message("Renamed $old => $new"); 
 			} else {
 				$this->error("Unable to rename $old => $new"); 		
+				//MP: should we try to revert rename operation?
+				//MP: $files->rename($newPath, $oldPath);
 			}
 		}
 		$this->renames = array();
@@ -956,7 +971,8 @@ class ProcessWireUpgrade extends Process {
 		$page->name = self::pageName; 
 
 		// installs to the admin "Setup" menu ... change as you see fit
-		$page->parent = $this->pages->get($this->config->adminRootPageID)->child('name=setup');
+		//MP: https://github.com/ryancramerdesign/ProcessWireUpgrade/pull/34/commits/9e9f172b348001f6ad2d259dbe7d2d936f7ef2a5
+		$page->parent = $this->pages->get($this->config->adminRootPageID)->child('name=setup, include=all'); 
 		$page->process = $this; 
 
 		// we will make the page title the same as our module title

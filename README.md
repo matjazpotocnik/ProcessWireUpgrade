@@ -6,7 +6,7 @@ installation from the admin.
 Can be used to upgrade your ProcessWire core or any module that
 is available from <https://processwire.com/modules/>.
 
-Requires ProcessWire 3.x
+Requires ProcessWire 3.0.178
 
 ## Please note before using this tool
 
