@@ -860,7 +860,7 @@ class ProcessWireUpgrade extends Process {
 				throw new WireException("Upgrade aborted. Unable to rename $_old => $_new"); 
 			}
 		}
-		
+
 		return $result; 
 	}
 	
