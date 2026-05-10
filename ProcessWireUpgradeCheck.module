@@ -4,14 +4,14 @@
  * ProcessWire Upgrade Check
  *
  * Automatically checks for core and installed module upgrades at routine intervals.
- * Also provides the API functions for repository info used by ProcessWireUpgrade module. 
+ * Also provides the API functions for repository info used by ProcessWireUpgrade module.
  *
- * ProcessWire 
- * Copyright (C) 2021 by Ryan Cramer 
+ * ProcessWire
+ * Copyright (C) 2021 by Ryan Cramer
  * Licensed under MPL 2.0
- * 
+ *
  * https://processwire.com
- * 
+ *
  * @property bool $useLoginHook
  *
  */
@@ -19,124 +19,133 @@
 class ProcessWireUpgradeCheck extends WireData implements Module {
 
 	/**
-	 * Return information about this module (required)
+	 * Return information about this module
 	 *
+	 * @return array<string, mixed>
 	 */
-	public static function getModuleInfo() {
-		return array(
-			'title' => 'Upgrades Checker', 
-			'summary' => 'Automatically checks for core and installed module upgrades at routine intervals.', 
-			'version' => 9, 
-			'autoload' => "template=admin", 
-			'singular' => true, 
-			'author' => 'Ryan Cramer', 
+	public static function getModuleInfo(): array {
+		return [
+			'title' => 'Upgrades Checker',
+			'summary' => 'Automatically checks for core and installed module upgrades at routine intervals.',
+			'version' => 10,
+			'autoload' => 'template=admin',
+			'singular' => true,
+			'author' => 'Ryan Cramer, Matjaž Potočnik, Claude Sonnet 4.6',
 			'icon' => 'coffee',
 			'requires' => 'ProcessWireUpgrade',
-		); 
+		];
 	}
 
-	const tagsURL = 'https://api.github.com/repos/processwire/processwire/tags';
-	const branchesURL = 'https://api.github.com/repos/processwire/processwire/branches';
-	const versionURL = 'https://raw.githubusercontent.com/processwire/processwire/{branch}/wire/core/ProcessWire.php'; 
-	const zipURL = 'https://github.com/processwire/processwire/archive/{branch}.zip';
-	const timeout = 4.5;
+	const TIMEOUT = 4.5;
 
 	/**
-	 * Repository information indexed by branch 
-	 * 
-	 * @var array
-	 * 
+	 * Repository information indexed by branch
+	 *
+	 * @var array<string, array{branchesURL: string, zipURL: string, versionURL: string, tagsURL: string, devzipURL: string}>
+	 *
 	 */
-	protected $repos = array();
+	protected array $repos = [];
 
 	/**
 	 * Construct
-	 * 
+	 *
 	 */
 	public function __construct() {
 		$this->set('useLoginHook', 1);
-		$this->repos = array(
-			'main' => array(
-				'branchesURL' => self::branchesURL,
-				'zipURL' => self::zipURL,
-				'versionURL' => self::versionURL,
-				'tagsURL' => self::tagsURL,
-			),
-		);
+		$this->repos = [
+			'main' => [
+				'branchesURL' => 'https://api.github.com/repos/processwire/processwire/branches',
+				'zipURL'      => 'https://github.com/processwire/processwire/archive/{branch}.zip',
+				'versionURL'  => 'https://raw.githubusercontent.com/processwire/processwire/{branch}/wire/core/ProcessWire.php',
+				'tagsURL'     => 'https://api.github.com/repos/processwire/processwire/tags',
+				'devzipURL'   => 'https://github.com/processwire/processwire/archive/{sha}.zip',
+			],
+		];
 	}
 
 	/**
 	 * Initialize and perform access checks
 	 *
 	 */
-	public function init() {
+	public function init(): void {
 		if($this->useLoginHook) {
-			$this->session->addHookAfter('login', $this, 'loginHook'); 
+			$this->session->addHookAfter('login', $this, 'loginHook');
 		}
 	}
 
 	/**
 	 * Check for upgrades at login (superuser only)
-	 * 
+	 *
 	 * @param null|HookEvent $e
 	 *
 	 */
-	public function loginHook($e = null) {
-		
-		if($e) {} // ignored HookEvent
+	public function loginHook($e = null): void {
+
+		//if($e) {} // ignored HookEvent
 		if(!$this->user->isSuperuser()) return; // only show messages to superuser
 
-		$moduleVersions = array();
-		$cache = $this->cache; 
+		$moduleVersions = [];
+		$cache = $this->cache;
 		$cacheName = $this->className() . "_loginHook";
 		$cacheData = $cache ? $cache->get($cacheName) : null;
-		
-		if(!empty($cacheData) && is_string($cacheData)) $cache = json_decode($cacheData, true); 
 
-		$branches = empty($cacheData) ? $this->getCoreBranches(false) : $cacheData['branches']; 
+		// Note: this line previously overwrote $cache (the WireCache object) — fixed to use $cacheData
+		if(!empty($cacheData) && is_string($cacheData)) $cacheData = json_decode($cacheData, true);
+		$branches = $this->getCoreBranches(false);
+		if(is_array($cacheData) && isset($cacheData['branches']) && is_array($cacheData['branches'])) {
+			$branches = $cacheData['branches'];
+		}
 		if(empty($branches)) return;
+		if(!isset($branches['master']) || !is_array($branches['master']) || !isset($branches['master']['version']) || !is_string($branches['master']['version'])) return;
 		$master = $branches['master'];
 		$branch = null;
 		$new = version_compare($master['version'], $this->config->version);
 
-		if($new > 0) { 
+		if($new > 0) {
 			// master is newer than current
-			$branch = $master;	
-		} else if($new < 0 && isset($branches['dev'])) {
+			$branch = $master;
+		} elseif($new < 0 && isset($branches['dev'])) {
 			// we will assume dev branch
 			$dev = $branches['dev'];
-			$new = version_compare($dev['version'], $this->config->version);
-			if($new > 0) $branch = $dev; 
+			if(is_array($dev) && ($devVersion = $this->toString($dev['version'] ?? '')) !== '') {
+				$new = version_compare($devVersion, $this->config->version);
+				if($new > 0) $branch = $dev;
+			}
 		}
 
-		if($branch) { 
-			$versionStr = "$branch[name] $branch[version]"; 
-			$msg = $this->_('A ProcessWire core upgrade is available') . " ($versionStr)"; 
-			$this->message($msg); 
+		if(is_array($branch)) {
+			/** @var array<string, mixed> $branch */
+			$branchName = $this->toString($branch['name'] ?? '');
+			$branchVersion = $this->toString($branch['version'] ?? '');
+			$versionStr = trim($branchName . ' ' . $branchVersion);
+			$msg = $this->_('A ProcessWire core upgrade is available') . " ($versionStr)";
+			$this->message($msg);
 		} else {
 			$this->message($this->_('Your ProcessWire core is up-to-date'));
 		}
 
-		if($this->config->moduleServiceKey) { 
+		if($this->config->moduleServiceKey) {
 			$n = 0;
-			if(empty($cacheData) || empty($cacheData['moduleVersions'])) {
-				$moduleVersions = $this->getModuleVersions(true);
-			} else { 
-				$moduleVersions = $cacheData['moduleVersions'];
+			if(!is_array($cacheData) || empty($cacheData['moduleVersions'])) {
+				// Skip GitHub SHA checks on login — those run on the upgrade page only
+				$moduleVersions = $this->getModuleVersions(true, false, false);
+			} else {
+				$moduleVersions = is_array($cacheData['moduleVersions']) ? $cacheData['moduleVersions'] : [];
 			}
+			/** @var array<string, array<string, mixed>> $moduleVersions */
 			foreach($moduleVersions as $name => $info) {
-				$msg = sprintf($this->_('An upgrade for %s is available'), $name) . " ($info[remote])"; 
-				$this->message($msg); 
+				$msg = sprintf($this->_('An upgrade for %s is available'), $name) . " ({$this->toString($info['remote'] ?? '')})";
+				$this->message($msg);
 				$n++;
 			}
-			if(!$n) $this->message($this->_('Your modules are up-to-date')); 
+			if(!$n) $this->message($this->_('Your modules are up-to-date'));
 		}
 
 		if($cache) {
-			$cacheData = array(
-				'branches' => $branches, 
+			$cacheData = [
+				'branches' => $branches,
 				'moduleVersions' => $moduleVersions
-			);
+			];
 			$cache->save($cacheName, $cacheData, 43200); // 43200=12hr
 		}
 	}
@@ -150,281 +159,575 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 	 *		'title' => 'Module Title',
 	 *		'local' => '1.2.3', // current installed version
 	 * 		'remote' => '1.2.4', // directory version available, or boolean false if not found in directory
-	 *		'new' => true|false, // true if newer version available, false if not
-	 *		'requiresVersions' => array('ModuleName' => array('>', '1.2.3')), // module requirements (for modules only)
-	 *		'branch' => 'master', // branch name (for core only)
-	 *		)
-	 * 	) 
+	 * @return array<string, array{
+	 *   title: string,
+	 *   icon: string,
+	 *   local: string,
+	 *   remote: string|false,
+	 *   new: int,
+	 *   author: string,
+	 *   href: string,
+	 *   summary: string,
+	 *   urls?: array<string, string>,
+	 *   branch?: string,
+	 *   requiresVersions?: array<string, array{0: string, 1: string}>,
+	 *   installs?: array<int, string>,
+	 *   installer?: string,
+	 *   pro?: bool,
+	 *   sha?: string
+	 * }>
 	 *
 	 */
-	public function getVersions($refresh = false) {
-		
-		$versions = array();
+	public function getVersions(bool $refresh = false) {
+
+		$versions = [];
 		$branches = $this->getCoreBranches(false, $refresh);
-		
+
 		foreach($branches as $branchName => $branch) {
-			$name = "ProcessWire $branchName"; 
-			$new = version_compare($branch['version'], $this->config->version); 
-			$versions[$name] = array(
-				'title' => "ProcessWire Core ($branch[title])", 
+			$name = "ProcessWire $branchName";
+			$new = version_compare($branch['version'], $this->config->version);
+			// Bleeding-edge branch: compare current SHA against the last installed SHA;
+			// only offer as an upgrade when the SHA has actually changed.
+			if(isset($branch['sha'])) {
+				$installedSha = $this->cache->get('ProcessWireUpgrade_installedDevSha');
+				if($installedSha && $installedSha === $branch['sha']) {
+					$new = 0; // same SHA as last install — up-to-date
+				} elseif($new >= 0) {
+					$new = 1; // different (or never installed) SHA — offer upgrade
+				}
+			}
+			$remote = $branch['version'];
+			if(isset($branch['sha'])) $remote .= ' (' . substr($branch['sha'], 0, 7) . ')';
+			$versions[$name] = [
+				'title' => "ProcessWire Core ($branch[title])",
 				'icon' => 'microchip',
 				'local' => $this->config->version,
-				'remote' => $branch['version'], 
+				'remote' => $remote,
 				'new' => $new,
-				'branch' => $branch['name'], 
-				'author' => 'ProcessWire', 
-				'href' => '', 
+				'branch' => $branch['name'],
+				'author' => 'ProcessWire',
+				'href' => '',
 				'summary' => '',
-				'urls' => isset($branch['urls']) ? $branch['urls'] : array()
-			);
+				'urls' => $branch['urls'] ?? []
+			];
 		}
 
-		if($this->config->moduleServiceKey) { 
+		if($this->config->moduleServiceKey) {
 			foreach($this->getModuleVersions(false, $refresh) as $name => $info) {
-				$versions[$name] = $info; 
+				$versions[$name] = $info;
 			}
 		}
 
-		return $versions; 
+		return $versions;
 	}
-	
-	protected function getModuleInfoVerbose($name) {
-		$info = $this->modules->getModuleInfoVerbose($name);
-		return $info;
+
+	/**
+	 * Return normalized, type-safe module info for the given module name.
+	 *
+	 * @return array{
+	 *   core: bool,
+	 *   title: string,
+	 *   summary: string,
+	 *   icon: string,
+	 *   author: string,
+	 *   href: string,
+	 *   versionStr: string,
+	 *   requiresVersions: array<string, array{0: string, 1: string}>,
+	 *   installs: array<int, string>
+	 * }
+	 */
+	protected function getModuleInfoVerbose(string $name): array {
+		$raw = $this->modules->getModuleInfoVerbose($name);
+		/** @var array<string, mixed> $raw */
+
+		$requiresVersions = [];
+		$rawRequires = $raw['requiresVersions'] ?? [];
+		if(is_array($rawRequires)) {
+			foreach($rawRequires as $requiresName => $requiresPair) {
+				if(!is_array($requiresPair)) continue;
+				$reqName = $this->toString($requiresName);
+				if($reqName === '') continue;
+				$requiresVersions[$reqName] = [
+					$this->toString($requiresPair[0] ?? ''),
+					$this->toString($requiresPair[1] ?? ''),
+				];
+			}
+		}
+
+		$installs = [];
+		$rawInstalls = $raw['installs'] ?? [];
+		if(is_array($rawInstalls)) {
+			foreach($rawInstalls as $installName) {
+				$installName = $this->toString($installName);
+				if($installName !== '') $installs[] = $installName;
+			}
+		}
+
+		return [
+			'core'             => !empty($raw['core']),
+			'title'            => $this->toString($raw['title'] ?? ''),
+			'summary'          => $this->toString($raw['summary'] ?? ''),
+			'icon'             => $this->toString($raw['icon'] ?? ''),
+			'author'           => $this->toString($raw['author'] ?? ''),
+			'href'             => $this->toString($raw['href'] ?? ''),
+			'versionStr'       => $this->toString($raw['versionStr'] ?? ''),
+			'requiresVersions' => $requiresVersions,
+			'installs'         => $installs,
+		];
+	}
+
+	/**
+	 * Return normalized, type-safe branch info for the given raw branch data.
+	 *
+	 * @param array<string, mixed> $raw
+	 * @return array{
+	 *   name: string,
+	 *   title: string,
+	 *   zipURL: string,
+	 *   devzipURL: string,
+	 *   version: string,
+	 *   versionURL: string,
+	 *   urls: array{repo: string, download: string, support: string},
+	 *   sha?: string
+	 * }
+	 */
+	protected function normalizeBranch(array $raw): array {
+		$urls = $raw['urls'] ?? [];
+		if (!is_array($urls)) $urls = [];
+
+		$normalized = [
+			'name'      => $this->toString($raw['name'] ?? ''),
+			'title'     => $this->toString($raw['title'] ?? ''),
+			'zipURL'    => $this->toString($raw['zipURL'] ?? ''),
+			'devzipURL' => $this->toString($raw['devzipURL'] ?? ''),
+			'version'   => $this->toString($raw['version'] ?? ''),
+			'versionURL' => $this->toString($raw['versionURL'] ?? ''),
+			'urls'      => [
+				'repo'     => $this->toString($urls['repo'] ?? ''),
+				'download' => $this->toString($urls['download'] ?? ''),
+				'support'  => $this->toString($urls['support'] ?? ''),
+			],
+		];
+
+		if (isset($raw['sha'])) {
+			$normalized['sha'] = $this->toString($raw['sha']);
+		}
+
+		return $normalized;
+	}
+
+	/**
+	 * Convert mixed values to string in a predictable way.
+	 *
+	 * @param mixed $value
+	 * @return string
+	 */
+	private function toString($value): string {
+		if(is_string($value)) return $value;
+		if(is_int($value) || is_float($value) || is_bool($value)) return (string) $value;
+		if($value instanceof \Stringable) return (string) $value;
+		return '';
+	}
+
+	/**
+	 * Create a WireHttp instance pre-configured for GitHub API requests.
+	 *
+	 * Sets User-Agent and Accept headers required by the GitHub API.
+	 * If $config->githubToken is set in /site/config.php it is sent as a
+	 * Bearer token, raising the rate limit from 60 to 5 000 requests/hour.
+	 *
+	 * @return WireHttp
+	 *
+	 */
+	protected function newGitHubHttp(): WireHttp {
+		$http = new WireHttp();
+		$this->wire($http);
+		$http->setTimeout(self::TIMEOUT);
+		$http->setHeader('User-Agent', 'ProcessWireUpgrade');
+		$http->setHeader('Accept', 'application/vnd.github.v3+json');
+		$token = $this->toString($this->wire()->config->githubToken ?? '');
+		if($token) $http->setHeader('Authorization', "Bearer $token");
+		return $http;
+	}
+
+	/**
+	 * Extract GitHub owner and repository name from a URL
+	 *
+	 * @param string $url
+	 * @return array{owner: string, repo: string}|null Array with owner/repo, or null if not a GitHub URL
+	 *
+	 */
+	protected function extractGitHubOwnerRepo(string $url) {
+		if(!preg_match('~github\.com/([^/#?]+)/([^/#?\s]+)~i', $url, $m)) return null;
+		return ['owner' => $m[1], 'repo' => rtrim($m[2], '.')];
+	}
+
+	/**
+	 * Fetch the latest commit SHA for a GitHub repository, cached for 6 hours
+	 *
+	 * @param string $owner GitHub owner or organisation
+	 * @param string $repo GitHub repository name
+	 * @param bool $refresh Force fetch, bypass cache
+	 * @return string Full SHA or empty string on failure
+	 *
+	 */
+	protected function fetchModuleRemoteSha(string $owner, string $repo, bool $refresh = false): string {
+		$cache = $this->cache;
+		$cacheKey = "ProcessWireUpgrade_remoteSha_{$owner}_{$repo}";
+		if(!$refresh) {
+			$cached = $cache->get($cacheKey);
+			if(is_string($cached) && $cached !== '') return $cached;
+		}
+		$url = "https://api.github.com/repos/{$owner}/{$repo}/commits?per_page=1";
+		$http = $this->newGitHubHttp();
+		$data = $http->getJSON($url);
+		if(!is_array($data) || !isset($data[0]) || !is_array($data[0])) return '';
+		$sha = $this->toString($data[0]['sha'] ?? '');
+		if($sha === '') return '';
+		$cache->save($cacheKey, $sha, 21600); // cache for 6 hours
+		return $sha;
 	}
 
 	/**
 	 * Check all site modules for newer versions from the directory
 	 *
 	 * @param bool $onlyNew Only return array of modules with new versions available
-	 * @param bool $refresh
-	 * @return array of array(
-	 * 	'ModuleName' => array(
-	 *    'title' => 'Module Title',
-	 *    'local' => '1.2.3', // current installed version
-	 *    'remote' => '1.2.4', // directory version available, or boolean false if not found in directory
-	 *    'new' => true|false, // true if newer version available, false if not
-	 *    'requiresVersions' => array('ModuleName' => array('>', '1.2.3')), // module requirements
-	 *  )
-	 * ) 
+	 * @param bool $refresh Force fresh data from remote services
+	 * @param bool $checkSha Whether to check GitHub commit SHAs for unreleased changes (default=true)
+	 * @return array<string, array{
+	 *   title: string,
+	 *   summary: string,
+	 *   icon: string,
+	 *   author: string,
+	 *   href: string,
+	 *   local: string,
+	 *   remote: string|false,
+	 *   new: int,
+	 *   requiresVersions: array<string, array{0: string, 1: string}>,
+	 *   installs: array<int, string>,
+	 *   urls?: array<string, string>,
+	 *   installer?: string,
+	 *   pro?: bool,
+	 *   sha?: string
+	 * }>
 	 * @throws WireException
 	 *
 	 */
-	public function getModuleVersions($onlyNew = false, $refresh = false) {
-		
+	public function getModuleVersions($onlyNew = false, $refresh = false, $checkSha = true) {
+
 		$modules = $this->modules;
 		$config = $this->config;
+		$cache = $this->cache;
 
 		if(!$this->config->moduleServiceKey) {
-			throw new WireException('Missing /site/config.php: value for $config->moduleServiceKey');
+			throw new WireException('Missing $config->moduleServiceKey in /site/config.php');
 		}
 
-		$url = 	
-			$config->moduleServiceURL . 
-			"?apikey=" . $config->moduleServiceKey . 
-			"&version=2" . 
-			"&limit=100" . 
-			"&field=module_version,version,requires,urls" . 
+		$url =
+			$config->moduleServiceURL .
+			"?apikey=" . $config->moduleServiceKey .
+			"&version=2" .
+			"&limit=100" .
+			"&field=module_version,version,requires,urls" .
 			"&class_name=";
 
-		$names = array(); 
-		$versions = array();
+		$names = [];
+		$versions = [];
 
 		foreach($modules as $module) {
 			$name = $module->className();
-			$info = $this->getModuleInfoVerbose($name); 
-			if($info['core']) continue; 
-			$names[] = $name; 
-			$versions[$name] = array(
-				'title' => $info['title'], 
-				'summary' => empty($info['summary']) ? '' : $info['summary'],
-				'icon' => empty($info['icon']) ? '' : $info['icon'], 
-				'author' => empty($info['author']) ? '' : $info['author'], 
-				'href' => empty($info['href']) ? '' : $info['href'],
-				'local' => $modules->formatVersion($info['version']), 
-				'remote' => false, 
-				'new' => 0,
+			$info = $this->getModuleInfoVerbose($name);
+			if($info['core']) continue;
+
+			$names[] = $name;
+			$versions[$name] = [
+				'title'            => $info['title'],
+				'summary'          => $info['summary'],
+				'icon'             => $info['icon'],
+				'author'           => $info['author'],
+				'href'             => $info['href'],
+				'local'            => $info['versionStr'],
 				'requiresVersions' => $info['requiresVersions'],
-				'installs' => $info['installs'], 
-			);
+				'installs'         => $info['installs'],
+				'remote'           => false,
+				'new'              => 0,
+			];
 		}
 
-		if(!count($names)) return array();
-		
-		ksort($versions);
-		
-		$url .= implode(',', $names);
+		if(!$names) return [];
 
 		$data = $refresh ? null : $this->session->getFor($this, 'moduleVersionsData');
-		
-		if(empty($data)) { 
-			// if not cached
+
+		if(!is_array($data) || empty($data)) {
+			// if not cached or refreshing
+			$url .= implode(',', $names);
 			$http = new WireHttp();
 			$this->wire($http);
-			$http->setTimeout(self::timeout);
-			$data = $http->getJSON($url); 
-			$this->session->setFor($this, 'moduleVersionsData', $data); 
-		
+			$http->setTimeout(self::TIMEOUT);
+			$data = $http->getJSON($url);
+			$this->session->setFor($this, 'moduleVersionsData', $data);
+
 			if(!is_array($data)) {
-				$error = $http->getError();
-				if(!$error) $error = $this->_('Error retrieving modules directory data'); 
-				$this->error($error . " (" . $this->className() . ")"); 
-				return array();
+				$rawError = $http->getError();
+				/** @var array<string>|string $rawError */
+				$error = is_array($rawError) ? implode(', ', $rawError) : $rawError;
+				if(!$error) $error = $this->_('Error retrieving modules directory data');
+				$this->error($error . " (" . $this->className() . ")");
+				return [];
 			}
 		}
-		
-		$newVersions = array();
-		$installedBy = array(); // moduleName => installedByModuleName
 
-		foreach($data['items'] as $item) {
-			$name = $item['class_name'];
-			if(empty($versions[$name]) || empty($versions[$name]['local'])) continue;
-			$versions[$name]['remote'] = $item['version'];	
-			$new = version_compare($versions[$name]['remote'], $versions[$name]['local']);
-			$versions[$name]['new'] = $new; 
-			$versions[$name]['urls'] = $item['urls'];
+		$newVersions = [];
+		$installedBy = []; // moduleName => installedByModuleName
+		if(!isset($data['items']) || !is_array($data['items'])) return $versions;
+		$items = $data['items'];
+		/** @var array<int, array<string, mixed>> $items */
+
+		ksort($versions);
+
+		foreach($items as $item) {
+			if(!is_array($item)) continue;
+			$name = $this->toString($item['class_name'] ?? '');
+			if($name === '' || empty($versions[$name]) || empty($versions[$name]['local'])) continue;
+			$localVersion = $this->toString($versions[$name]['local']);
+			$remoteVersion = $this->toString($item['version'] ?? '');
+			if($localVersion === '' || $remoteVersion === '') continue;
+			$versions[$name]['remote'] = $remoteVersion;
+			$new = version_compare($remoteVersion, $localVersion);
+			$urls = isset($item['urls']) && is_array($item['urls']) ? $item['urls'] : [];
+			$versions[$name]['new'] = $new;
+			$versions[$name]['urls'] = $urls;
 			$versions[$name]['installer'] = '';
-			$versions[$name]['pro'] = !empty($item['pro']); 
-		
-			if(!empty($versions[$name]['installs'])) {
-				foreach($versions[$name]['installs'] as $installsName) {
+			$versions[$name]['pro'] = !empty($item['pro']);
+
+			$installs = $versions[$name]['installs'];
+			if(!empty($installs)) {
+				foreach($installs as $installsName) {
 					$installedBy[$installsName] = $name;
 				}
 			}
-			
+
 			if($new <= 0) {
-				// local is up-to-date or newer than remote
-				if($onlyNew) unset($versions[$name]);
-				continue;
+				// When versions match, optionally check for new commits on GitHub
+				$repoUrl = isset($urls['repo']) && is_string($urls['repo']) ? $urls['repo'] : '';
+				if($checkSha && $new === 0 && $repoUrl !== '') {
+					$gh = $this->extractGitHubOwnerRepo($repoUrl);
+					if($gh) {
+						$remoteSha = $this->fetchModuleRemoteSha($gh['owner'], $gh['repo'], $refresh);
+						if($remoteSha) {
+							// Key includes local version so the baseline resets automatically after a version upgrade
+							$shaKey = "ProcessWireUpgrade_installedSha_{$name}_{$localVersion}";
+						$installedSha = $cache->get($shaKey);
+						if($installedSha === null) {
+							// First check for this version — establish baseline silently
+							$cache->save($shaKey, $remoteSha, WireCache::expireNever);
+							} elseif($installedSha !== $remoteSha) {
+								// New commits on GitHub since baseline was recorded
+								$new = 1;
+								$versions[$name]['new'] = 1;
+								$versions[$name]['sha'] = $remoteSha;
+								$versions[$name]['remote'] = $this->toString($versions[$name]['remote']) . ' (' . substr($remoteSha, 0, 7) . ')';
+								// Baseline only advances after actual installation (version bumps →
+								// new cache key → first-run baseline set silently). A bare Refresh
+								// must NOT clear the notification, so we intentionally do nothing here.
+							}
+						}
+					}
+				}
+	
+				if($new <= 0) {
+					// local is up-to-date or newer than remote
+					if($onlyNew) unset($versions[$name]);
+					continue;
+				}
 			}
-			
-			// remote is newer than local
-			$versions[$name]['requiresVersions'] = $item['requires'];
-			
-			if($new > 0 && !$onlyNew) {
+
+			// remote is newer than local (by version or new GitHub commits)
+			$versions[$name]['requiresVersions'] = isset($item['requires']) && is_array($item['requires']) ? $item['requires'] : [];
+
+			if(!$onlyNew) {
 				$newVersions[$name] = $versions[$name];
 				unset($versions[$name]);
 			}
 		}
-		
+
+		// SHA check for modules not listed in the PW directory but with a GitHub URL in their href
+		if($checkSha) {
+			foreach($versions as $name => $item) {
+				if($item['remote'] !== false) continue; // already handled via directory loop
+				$href = $this->toString($item['href']);
+				if($href === '') continue;
+				$gh = $this->extractGitHubOwnerRepo($href);
+				if(!$gh) continue;
+				$remoteSha = $this->fetchModuleRemoteSha($gh['owner'], $gh['repo'], $refresh);
+				if(!$remoteSha) continue;
+				$localVersion = $this->toString($item['local']);
+				$shaKey = "ProcessWireUpgrade_installedSha_{$name}_{$localVersion}";
+				$installedSha = $cache->get($shaKey);
+				if($installedSha === null) {
+					// First check — establish baseline silently
+					$cache->save($shaKey, $remoteSha, WireCache::expireNever);
+				} elseif($installedSha !== $remoteSha) {
+					// New commits since baseline
+					$versions[$name]['new'] = 1;
+					$versions[$name]['sha'] = $remoteSha;
+					$versions[$name]['remote'] = $localVersion . ' (' . substr($remoteSha, 0, 7) . ')';
+					$versions[$name]['urls'] = ['repo' => $href];
+					$versions[$name]['installer'] = '';
+					$versions[$name]['pro'] = false;
+					if(!$onlyNew) {
+						$newVersions[$name] = $versions[$name];
+						unset($versions[$name]);
+					}
+				}
+			}
+		}
+
 		if($onlyNew) {
 			foreach($versions as $name => $item) {
 				if($item['remote'] === false) unset($versions[$name]);
 			}
-		} else if(count($newVersions)) {
+		} elseif(count($newVersions)) {
 			$versions = $newVersions + $versions;
 		}
 
 		foreach($versions as $name => $item) {
 			if(!empty($versions[$name]['remote'])) continue;
 			if(!isset($installedBy[$name])) continue;
-			$versions[$name]['installer'] = $installedBy[$name];
-			$installer = $versions[$installedBy[$name]]; 
+			$installerName = $installedBy[$name];
+			if(!isset($versions[$installerName])) continue;
+			$versions[$name]['installer'] = $installerName;
+			$installer = $versions[$installerName];
 			if(!empty($installer['pro'])) $versions[$name]['pro'] = true;
 		}
-		
-		return $versions; 	
+
+		/** @var array<string, array{title: string, summary: string, icon: string, author: string, href: string, local: string, remote: string|false, new: int, requiresVersions: array<string, array{0: string, 1: string}>, installs: array<int, string>, urls?: array<string, string>, installer?: string, pro?: bool, sha?: string}> $versions */
+		return $versions;
 	}
-	
+
 	/**
 	 * Get all available branches with info for each
 	 *
 	 * @param bool $throw Whether or not to throw exceptions on error (default=true)
 	 * @param bool $refresh Specify true to refresh data from web service
-	 * @return array of branches each with: 
-	 *	- name (string) i.e. dev
-	 *	- title (string) i.e. Development
-	 *	- zipURL (string) URL to zip download file
-	 * 	- version (string) i.e. 2.5.0
-	 *	- versionURL (string) URL to we pull version from
+	 * @return array<string, array{
+	 *   name: string,
+	 *   title: string,
+	 *   zipURL: string,
+	 *   devzipURL: string,
+	 *   version: string,
+	 *   versionURL: string,
+	 *   urls: array{repo: string, download: string, support: string},
+	 *   sha?: string
+	 * }>
 	 * @throws WireException
 	 *
 	 */
 	public function getCoreBranches($throw = true, $refresh = false) {
 
-		if(!$refresh) { 
-			$branches = $this->session->getFor($this, 'branches'); 
-			if($branches && count($branches)) return $branches; 
+		if(!$refresh) {
+			$branches = $this->session->getFor($this, 'branches');
+			if(is_array($branches) && count($branches)) {
+				/** @var array<string, array{name: string, title: string, zipURL: string, devzipURL: string, version: string, versionURL: string, urls: array{repo: string, download: string, support: string}, sha?: string}> $branches */
+				return $branches;
+			}
 		}
-		
-		$branches = array();
-		
-		foreach($this->repos as $repoName => $repo) {
-			
-			$http = new WireHttp();
-			$this->wire($http);
-			$http->setTimeout(self::timeout);
-			$http->setHeader('User-Agent', 'ProcessWireUpgrade');
-			$json = $http->get($repo['branchesURL']);
-			
-			$loadError = $this->_('Error loading GitHub branches') . ' - ' . $repo['branchesURL'];
 
-			if(!$json) {
+		$branches = [];
+		$cache = $this->cache;
+
+		// get sha and cache for 6 hours
+		$sha = '';
+		$shaDevCacheKey = 'ProcessWireUpgrade_devCoreSha';
+		if(!$refresh) {
+			$sha = $this->toString($cache->get($shaDevCacheKey));
+		}
+		if(empty($sha)) {
+			$shaData = $this->newGitHubHttp()->getJSON('https://api.github.com/repos/processwire/processwire/commits?sha=dev&per_page=1');
+			if(is_array($shaData) && isset($shaData[0]) && is_array($shaData[0]) && is_string($shaData[0]['sha'] ?? null)) {
+				$sha = $shaData[0]['sha'];
+				$cache->save($shaDevCacheKey, $sha, 21600); // 6 hours
+			} else {
+				$this->warning("ProcessWireUpgrade: unable to fetch latest dev commit SHA from GitHub — dev-latest branch will not be available.");
+			}
+		}
+
+		foreach($this->repos as $repoName => $repo) {
+
+			$http = $this->newGitHubHttp();
+			$data = $http->getJSON($repo['branchesURL']);
+
+			$loadError = $this->_('Error loading GitHub branches') . ' - ' . (string) $repo['branchesURL'];
+
+			if(!is_array($data) || empty($data)) {
 				$error = $loadError;
-				$error .= ' - ' . $this->_('HTTP error(s):') . ' ' . $http->getError();
+				$rawErr = $http->getError();
+				/** @var array<string>|string $rawErr */
+				$error .= ' - ' . $this->_('HTTP error(s):') . ' ' . (is_array($rawErr) ? implode(', ', $rawErr) : $rawErr);
 				$error .= ' - ' . $this->_('Check that HTTP requests are not blocked by your server.');
 				if($throw) throw new WireException($error);
 				$this->error($error);
-				return array();
+				return [];
 			}
 
-			$data = json_decode($json, true);
-			
-			if(!$data) {
-				$error = $loadError;
-				if($throw) throw new WireException($error);
-				$this->error($error);
-				return array();
-			}
-			
-			foreach($data as $key => $info) {
-				
-				if(empty($info['name'])) continue;
-				
+			foreach($data as $info) {
+
+				if(!is_array($info) || empty($info['name']) || !is_string($info['name'])) continue;
+
 				$name = $info['name'];
-				
-				$branch = array(
+
+				$branch = [
 					'name' => $name,
 					'title' => ucfirst($name),
 					'zipURL' => str_replace('{branch}', $name, $repo['zipURL']),
+					'devzipURL' => str_replace('{sha}', $sha, $repo['devzipURL']),
 					'version' => '',
 					'versionURL' => str_replace('{branch}', $name, $repo['versionURL']),
-				);
+				];
 
 				$content = $http->get($branch['versionURL']);
-				if(!preg_match_all('/const\s+version(Major|Minor|Revision)\s*=\s*(\d+)/', $content, $matches)) {
+				if(!is_string($content) || !preg_match_all('/const\s+version(Major|Minor|Revision)\s*=\s*(\d+)/', $content, $matches)) {
 					$branch['version'] = '?';
 					continue;
 				}
 
-				$version = array();
+				$version = [];
 				foreach($matches[1] as $k => $var) {
 					$version[$var] = (int) $matches[2][$k];
 				}
 
 				$branch['version'] = "$version[Major].$version[Minor].$version[Revision]";
-			
+
 				$url = 'https://github.com/processwire/processwire';
-				$branch['urls'] = array(
+				$branch['urls'] = [
 					'repo' => ($name === 'dev' ? "$url/tree/dev" : $url),
-					'download' => "$url/archive/refs/heads/$name.zip", 
-					'support' => 'https://processwire.com/talk/', 
-				);
-				
+					'download' => "$url/archive/refs/heads/$name.zip",
+					'support' => 'https://processwire.com/talk/',
+				];
+
 				if($repoName != 'main') {
 					$name = "$repoName-$name";
 					$branch['name'] = $name;
 					$branch['title'] = ucfirst($repoName) . "/$branch[title]";
 				}
-				
-				$branches[$name] = $branch;
+
+				$branches[$name] = $this->normalizeBranch($branch);
 			}
 		}
 
-		$this->session->setFor($this, 'branches', $branches); 
+		// Add a bleeding-edge dev-latest entry based on the latest commit SHA
+		if(!empty($sha) && isset($branches['dev'])) {
+			$devLatest = $branches['dev'];
+			$devLatest['name'] = 'dev-latest';
+			$devLatest['title'] = 'Dev (latest commit)';
+			$devLatest['zipURL'] = $devLatest['devzipURL']; // SHA-based archive URL
+			$devLatest['sha'] = $sha;
+			$branches['dev-latest'] = $this->normalizeBranch($devLatest);
+		}
+
+		$this->session->setFor($this, 'branches', $branches);
 
 		return $branches;
 	}
 
 }
-
