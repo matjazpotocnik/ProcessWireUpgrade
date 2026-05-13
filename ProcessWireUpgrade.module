@@ -22,10 +22,12 @@ class ProcessWireUpgrade extends Process {
 		return [
 			'title' => 'Upgrades',
 			'summary' => 'Tool that helps you identify and install core and module upgrades.',
-			'version' => 13,
+			'version' => 14,
 			'author' => 'Ryan Cramer, Matjaž Potočnik, Claude Sonnet 4.6',
+			'repo' => 'https://github.com/matjazpotocnik/ProcessWireUpgrade',
+			'href' => 'https://processwire.com/talk/topic/7525-module-processwire-core-upgrade/',
 			'installs' => 'ProcessWireUpgradeCheck',
-			'requires' => ['ProcessWire>=3.0.245', 'PHP>=8.2'],
+			'requires' => ['ProcessWire>=3.0.246', 'PHP>=8.2'],
 			'icon' => 'coffee',
 		];
 	}
@@ -214,10 +216,11 @@ class ProcessWireUpgrade extends Process {
 		$table = $modules->get('MarkupAdminDataTable');
 		$table->setEncodeEntities(false);
 		$table->headerRow([
-			$this->_('Module title'),
-			$this->_('Module name'),
+			$this->_('Title'),
+			$this->_('Name'),
 			$this->_('Installed'),
 			$this->_('Latest'),
+			$this->_('Updated'),
 			$this->_('Status'),
 			$this->_('Links'),
 		]);
@@ -269,6 +272,7 @@ class ProcessWireUpgrade extends Process {
 				}
 				$urls = $item['urls'] ?? [];
 				foreach($urls as $key => $url) $urls[$key] = $sanitizer->entities($url);
+				$href = $this->toString($item['href'] ?? '');
 				if(!empty($urls['support'])) {
 					$links[] = $this->iconLink('life-ring', $urls['support'], 'Support');
 				}
@@ -276,8 +280,10 @@ class ProcessWireUpgrade extends Process {
 					$links[] = $this->iconLink('github-alt', $urls['repo'], 'GitHub');
 				} elseif(!empty($urls['repo'])) {
 					$links[] = $this->iconLink('info-circle', $urls['repo'], 'Details');
-				} elseif(!empty($item['href'])) {
-					$links[] = $this->iconLink('info-circle', $item['href'], 'Info');
+				} elseif($href !== '' && str_contains($href, 'github.com')) {
+					$links[] = $this->iconLink('github-alt', $href, 'GitHub');
+				} elseif($href !== '') {
+					$links[] = $this->iconLink('info-circle', $href, 'Info');
 				}
 				if(!empty($urls['dir'])) {
 					$links[] = $this->iconLink('share-alt', $urls['dir'], 'Directory');
@@ -307,13 +313,22 @@ class ProcessWireUpgrade extends Process {
 					$title = $this->a($upgradeURL, $title);
 				}
 
+				$shaDate = '';
+				if (isset($item['shaDate']) && is_string($item['shaDate']) && $item['shaDate'] !== '') {
+					$timestamp = strtotime($item['shaDate']);
+					if ($timestamp !== false) {
+						$shaDate = "<span style='font-size:0'>$timestamp </span>" . wireRelativeTimeStr($timestamp);
+					}
+				}
+
 				$table->row([
 					$title,
 					$sanitizer->entities($name),
 					$sanitizer->entities($item['local']),
 					$remote,
+					$shaDate,
 					$upgrade,
-					$this->span(implode(' ', $links), 'links')
+					$this->span(implode(' ', $links), 'links'),
 				]);
 			}
 		}
@@ -964,7 +979,8 @@ class ProcessWireUpgrade extends Process {
 		$lastRefreshRaw = $this->session->getFor($this, 'lastRefresh');
 		$lastRefreshValue = $this->toString($lastRefreshRaw);
 		$lastRefresh = $lastRefreshValue !== '' ? wireRelativeTimeStr($lastRefreshValue) : $this->_('N/A');
-		$out = sprintf($this->_('Last refresh: %s'), $lastRefresh);
+		$out = sprintf($this->_('Last refresh: %s.'), $lastRefresh);
+		$out .= $this->checker->useModuleInfoRepo ? " GitHub checks and links are from module's info array." : "ProcessWire modules directory repo URL is used.";
 		if($paragraph) $out = $this->p($out, 'detail last-refresh-info');
 		return $out;
 	}

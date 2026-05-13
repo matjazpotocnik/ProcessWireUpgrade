@@ -13,6 +13,7 @@
  * https://processwire.com
  *
  * @property bool $useLoginHook
+ * @property bool $useModuleInfoRepo
  *
  */
 
@@ -27,12 +28,14 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 		return [
 			'title' => 'Upgrades Checker',
 			'summary' => 'Automatically checks for core and installed module upgrades at routine intervals.',
-			'version' => 10,
+			'version' => 11,
 			'autoload' => 'template=admin',
 			'singular' => true,
+			'repo' => 'https://github.com/matjazpotocnik/ProcessWireUpgrade',
+			'href' => 'https://processwire.com/talk/topic/7525-module-processwire-core-upgrade/',
 			'author' => 'Ryan Cramer, Matjaž Potočnik, Claude Sonnet 4.6',
+			'requires' => ['ProcessWire>=3.0.246', 'PHP>=8.2', 'ProcessWireUpgrade'],
 			'icon' => 'coffee',
-			'requires' => 'ProcessWireUpgrade',
 		];
 	}
 
@@ -52,6 +55,7 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 	 */
 	public function __construct() {
 		$this->set('useLoginHook', 1);
+		$this->set('useModuleInfoRepo', 0);
 		$this->repos = [
 			'main' => [
 				'branchesURL' => 'https://api.github.com/repos/processwire/processwire/branches',
@@ -231,6 +235,7 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 	 *   icon: string,
 	 *   author: string,
 	 *   href: string,
+	 *   repo: string,
 	 *   versionStr: string,
 	 *   requiresVersions: array<string, array{0: string, 1: string}>,
 	 *   installs: array<int, string>
@@ -270,6 +275,7 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 			'icon'             => $this->toString($raw['icon'] ?? ''),
 			'author'           => $this->toString($raw['author'] ?? ''),
 			'href'             => $this->toString($raw['href'] ?? ''),
+			'repo'             => $this->toString($raw['repo'] ?? ''),
 			'versionStr'       => $this->toString($raw['versionStr'] ?? ''),
 			'requiresVersions' => $requiresVersions,
 			'installs'         => $installs,
@@ -363,29 +369,43 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 	}
 
 	/**
-	 * Fetch the latest commit SHA for a GitHub repository, cached for 6 hours
+	 * Fetch the latest commit SHA and date for a GitHub repository, cached for 6 hours
 	 *
 	 * @param string $owner GitHub owner or organisation
 	 * @param string $repo GitHub repository name
 	 * @param bool $refresh Force fetch, bypass cache
-	 * @return string Full SHA or empty string on failure
+	 * @return array{sha: string, date: string}|false SHA and commit date, or false on failure
 	 *
 	 */
-	protected function fetchModuleRemoteSha(string $owner, string $repo, bool $refresh = false): string {
+	protected function fetchModuleRemoteSha(string $owner, string $repo, bool $refresh = false): array|false {
 		$cache = $this->cache;
 		$cacheKey = "ProcessWireUpgrade_remoteSha_{$owner}_{$repo}";
 		if(!$refresh) {
 			$cached = $cache->get($cacheKey);
-			if(is_string($cached) && $cached !== '') return $cached;
+			if(is_array($cached) && isset($cached['sha']) && isset($cached['date'])) {
+				return [
+					'sha' => $this->toString($cached['sha']),
+					'date' => $this->toString($cached['date']),
+				];
+			}
 		}
 		$url = "https://api.github.com/repos/{$owner}/{$repo}/commits?per_page=1";
 		$http = $this->newGitHubHttp();
 		$data = $http->getJSON($url);
-		if(!is_array($data) || !isset($data[0]) || !is_array($data[0])) return '';
+		if(!is_array($data) || !isset($data[0]) || !is_array($data[0])) return false;
 		$sha = $this->toString($data[0]['sha'] ?? '');
-		if($sha === '') return '';
-		$cache->save($cacheKey, $sha, 21600); // cache for 6 hours
-		return $sha;
+		if($sha === '') return false;
+		$commit = $data[0]['commit'] ?? null;
+		if(!is_array($commit)) return false;
+		$committer = $commit['committer'] ?? null;
+		if(!is_array($committer)) return false;
+		$date = $this->toString($committer['date'] ?? '');
+		$result = [
+			'sha' => $sha,
+			'date' => $date,
+		];
+		$cache->save($cacheKey, $result, 21600); // cache for 6 hours
+		return $result;
 	}
 
 	/**
@@ -400,6 +420,7 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 	 *   icon: string,
 	 *   author: string,
 	 *   href: string,
+	 *   repo: string,
 	 *   local: string,
 	 *   remote: string|false,
 	 *   new: int,
@@ -408,12 +429,13 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 	 *   urls?: array<string, string>,
 	 *   installer?: string,
 	 *   pro?: bool,
-	 *   sha?: string
+	 *   sha?: string,
+	 *   shaDate?: string
 	 * }>
 	 * @throws WireException
 	 *
 	 */
-	public function getModuleVersions($onlyNew = false, $refresh = false, $checkSha = true) {
+	public function getModuleVersions(bool $onlyNew = false, bool $refresh = false, bool $checkSha = true) {
 
 		$modules = $this->modules;
 		$config = $this->config;
@@ -446,6 +468,7 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 				'icon'             => $info['icon'],
 				'author'           => $info['author'],
 				'href'             => $info['href'],
+				'repo'             => $info['repo'],
 				'local'            => $info['versionStr'],
 				'requiresVersions' => $info['requiresVersions'],
 				'installs'         => $info['installs'],
@@ -494,11 +517,39 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 			if($localVersion === '' || $remoteVersion === '') continue;
 			$versions[$name]['remote'] = $remoteVersion;
 			$new = version_compare($remoteVersion, $localVersion);
-			$urls = isset($item['urls']) && is_array($item['urls']) ? $item['urls'] : [];
+
+			$rawUrls = isset($item['urls']) && is_array($item['urls']) ? $item['urls'] : [];
+			$urls = [];
+			foreach($rawUrls as $urlKey => $urlValue) {
+				$key = $this->toString($urlKey);
+				if($key === '') continue;
+				$urls[$key] = $this->toString($urlValue);
+			}
+
 			$versions[$name]['new'] = $new;
 			$versions[$name]['urls'] = $urls;
 			$versions[$name]['installer'] = '';
 			$versions[$name]['pro'] = !empty($item['pro']);
+
+			$directoryRepoUrl = $urls['repo'] ?? '';
+			$localRepoUrl = $this->toString($versions[$name]['repo'] ?? '');
+			$repoUrl = $this->useModuleInfoRepo ? $localRepoUrl : $directoryRepoUrl;
+			$hrefRepoUrl = $this->toString($versions[$name]['href']);
+			$hrefGh = $hrefRepoUrl !== '' ? $this->extractGitHubOwnerRepo($hrefRepoUrl) : false;
+			if($repoUrl !== '') {
+				$versions[$name]['urls']['repo'] = $repoUrl;
+			}
+			if($hrefGh && ($repoUrl === '' || $new < 0)) {
+				$repoUrl = $hrefRepoUrl;
+				$versions[$name]['urls']['repo'] = $hrefRepoUrl;
+			}
+			if($checkSha && $repoUrl !== '') {
+				$gh = $this->extractGitHubOwnerRepo($repoUrl);
+				if($gh) {
+					$remoteShaData = $this->fetchModuleRemoteSha($gh['owner'], $gh['repo'], false);
+					if($remoteShaData) $versions[$name]['shaDate'] = $remoteShaData['date'];
+				}
+			}
 
 			$installs = $versions[$name]['installs'];
 			if(!empty($installs)) {
@@ -509,24 +560,25 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 
 			if($new <= 0) {
 				// When versions match, optionally check for new commits on GitHub
-				$repoUrl = isset($urls['repo']) && is_string($urls['repo']) ? $urls['repo'] : '';
 				if($checkSha && $new === 0 && $repoUrl !== '') {
 					$gh = $this->extractGitHubOwnerRepo($repoUrl);
 					if($gh) {
-						$remoteSha = $this->fetchModuleRemoteSha($gh['owner'], $gh['repo'], $refresh);
-						if($remoteSha) {
+						$remoteShaData = $this->fetchModuleRemoteSha($gh['owner'], $gh['repo'], false);
+						if($remoteShaData) {
+							$versions[$name]['shaDate'] = $remoteShaData['date'];
 							// Key includes local version so the baseline resets automatically after a version upgrade
 							$shaKey = "ProcessWireUpgrade_installedSha_{$name}_{$localVersion}";
-						$installedSha = $cache->get($shaKey);
-						if($installedSha === null) {
-							// First check for this version — establish baseline silently
-							$cache->save($shaKey, $remoteSha, WireCache::expireNever);
-							} elseif($installedSha !== $remoteSha) {
+							$installedSha = $cache->get($shaKey);
+							if($installedSha === null) {
+								// First check for this version — establish baseline silently
+								$cache->save($shaKey, $remoteShaData['sha'], WireCache::expireNever);
+							} elseif($installedSha !== $remoteShaData['sha']) {
 								// New commits on GitHub since baseline was recorded
 								$new = 1;
 								$versions[$name]['new'] = 1;
-								$versions[$name]['sha'] = $remoteSha;
-								$versions[$name]['remote'] = $this->toString($versions[$name]['remote']) . ' (' . substr($remoteSha, 0, 7) . ')';
+								$versions[$name]['sha'] = $remoteShaData['sha'];
+								$versions[$name]['shaDate'] = $remoteShaData['date'];
+								$versions[$name]['remote'] = $this->toString($versions[$name]['remote']) . ' (' . substr($remoteShaData['sha'], 0, 7) . ')';
 								// Baseline only advances after actual installation (version bumps →
 								// new cache key → first-run baseline set silently). A bare Refresh
 								// must NOT clear the notification, so we intentionally do nothing here.
@@ -543,7 +595,19 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 			}
 
 			// remote is newer than local (by version or new GitHub commits)
-			$versions[$name]['requiresVersions'] = isset($item['requires']) && is_array($item['requires']) ? $item['requires'] : [];
+			$requiresVersions = [];
+			if(isset($item['requires']) && is_array($item['requires'])) {
+				foreach($item['requires'] as $requiresName => $requiresPair) {
+					if(!is_array($requiresPair)) continue;
+					$reqName = $this->toString($requiresName);
+					if($reqName === '') continue;
+					$requiresVersions[$reqName] = [
+						$this->toString($requiresPair[0] ?? ''),
+						$this->toString($requiresPair[1] ?? ''),
+					];
+				}
+			}
+			$versions[$name]['requiresVersions'] = $requiresVersions;
 
 			if(!$onlyNew) {
 				$newVersions[$name] = $versions[$name];
@@ -551,28 +615,38 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 			}
 		}
 
-		// SHA check for modules not listed in the PW directory but with a GitHub URL in their href
+		// SHA check for modules not listed in the PW directory but with a GitHub URL in their repo or href
 		if($checkSha) {
 			foreach($versions as $name => $item) {
 				if($item['remote'] !== false) continue; // already handled via directory loop
-				$href = $this->toString($item['href']);
-				if($href === '') continue;
-				$gh = $this->extractGitHubOwnerRepo($href);
+				$repo = $this->toString($item['repo'] ?? '');
+				$href = $this->toString($item['href'] ?? '');
+				$gh = null;
+				$repoIsGh = false;
+				if($repo !== '') {
+					$gh = $this->extractGitHubOwnerRepo($repo);
+					$repoIsGh = (bool)$gh;
+				}
+				if(!$repoIsGh && $href !== '') {
+					$gh = $this->extractGitHubOwnerRepo($href);
+				}
 				if(!$gh) continue;
-				$remoteSha = $this->fetchModuleRemoteSha($gh['owner'], $gh['repo'], $refresh);
-				if(!$remoteSha) continue;
+				$remoteShaData = $this->fetchModuleRemoteSha($gh['owner'], $gh['repo'], false);
+				if(!$remoteShaData) continue;
+				$versions[$name]['shaDate'] = $remoteShaData['date'];
 				$localVersion = $this->toString($item['local']);
 				$shaKey = "ProcessWireUpgrade_installedSha_{$name}_{$localVersion}";
 				$installedSha = $cache->get($shaKey);
 				if($installedSha === null) {
 					// First check — establish baseline silently
-					$cache->save($shaKey, $remoteSha, WireCache::expireNever);
-				} elseif($installedSha !== $remoteSha) {
+					$cache->save($shaKey, $remoteShaData['sha'], WireCache::expireNever);
+				} elseif($installedSha !== $remoteShaData['sha']) {
 					// New commits since baseline
 					$versions[$name]['new'] = 1;
-					$versions[$name]['sha'] = $remoteSha;
-					$versions[$name]['remote'] = $localVersion . ' (' . substr($remoteSha, 0, 7) . ')';
-					$versions[$name]['urls'] = ['repo' => $href];
+					$versions[$name]['sha'] = $remoteShaData['sha'];
+					$versions[$name]['shaDate'] = $remoteShaData['date'];
+					$versions[$name]['remote'] = $localVersion . ' (' . substr($remoteShaData['sha'], 0, 7) . ')';
+					$versions[$name]['urls'] = ['repo' => $repoIsGh ? $repo : $href];
 					$versions[$name]['installer'] = '';
 					$versions[$name]['pro'] = false;
 					if(!$onlyNew) {
@@ -601,7 +675,6 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 			if(!empty($installer['pro'])) $versions[$name]['pro'] = true;
 		}
 
-		/** @var array<string, array{title: string, summary: string, icon: string, author: string, href: string, local: string, remote: string|false, new: int, requiresVersions: array<string, array{0: string, 1: string}>, installs: array<int, string>, urls?: array<string, string>, installer?: string, pro?: bool, sha?: string}> $versions */
 		return $versions;
 	}
 
@@ -623,7 +696,7 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 	 * @throws WireException
 	 *
 	 */
-	public function getCoreBranches($throw = true, $refresh = false) {
+	public function getCoreBranches(bool $throw = true, bool $refresh = false) {
 
 		if(!$refresh) {
 			$branches = $this->session->getFor($this, 'branches');

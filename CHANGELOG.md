@@ -1,5 +1,11 @@
 # Changelog
 
+## [v14] - 2026-05-13
+
+### Added
+- Config setting in the module setup to select Source for GitHub repo URL - can come from module info array or from PW modules directory
+- Last module updated date
+
 ## [v13] - 2026-05-10
 
 ### Added
