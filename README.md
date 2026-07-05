@@ -18,8 +18,8 @@ This fork adds GitHub-based commit tracking for unreleased updates, direct GitHu
 
 - PHP 8.2 or newer
 - ProcessWire 3.0.246 or newer
+- `cURL` PHP extension (`ext-curl`) for GitHub and module directory HTTP checks
 - `ZipArchive` PHP extension for installing core upgrades
-- A ProcessWire modules directory API key (`$config->moduleServiceKey`)
 
 ## Installation
 

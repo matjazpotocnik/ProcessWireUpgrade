@@ -71,7 +71,7 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 		return [
 			'title' => 'Upgrades Checker',
 			'summary' => 'Detects core and module upgrades including unreleased GitHub commits, with progressive AJAX checks, SHA baselines, and resilient fallback caching.',
-			'version' => 12,
+			'version' => 13,
 			'autoload' => 'template=admin',
 			'singular' => true,
 			'href' => 'https://github.com/matjazpotocnik/ProcessWireUpgrade',
@@ -464,8 +464,18 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 		// Module upgrade check
 		if($this->config->moduleServiceKey && !empty($moduleVersions)) {
 			foreach($moduleVersions as $name => $info) {
-				// Skip non-upgradeable parents injected to preserve child nesting
-				if(($info['new'] ?? 0) <= 0) continue;
+				// Skip non-upgradeable parents injected to preserve child nesting,
+				// unless a child module itself has an upgrade
+				if(($info['new'] ?? 0) <= 0) {
+					$childUpgrade = false;
+					$childModules = $info['childModules'] ?? [];
+					if(is_array($childModules)) {
+						foreach($childModules as $child) {
+							if(is_array($child) && ($child['new'] ?? 0) > 0) { $childUpgrade = true; break; }
+						}
+					}
+					if(!$childUpgrade) continue;
+				}
 				$remote = $this->toString($info['remote'] ?? '');
 				$this->message(sprintf($this->_('An upgrade for %s is available.'), $name) . " ($remote)");
 			}
@@ -517,9 +527,9 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 			// 1 if $remote is newer, -1 if $local is newer, 0 if they are the same
 			$new = version_compare($remote, $local);
 
-			// Append SHA suffix for informational display when unreleased commits exist
+			// Append SHA suffix only when dev is ahead of the installed version
 			$sha = $branch['sha'] ?? '';
-			if($sha !== '') {
+			if($branchName === self::BRANCH_DEV && $new > 0 && $sha !== '') {
 				$remote .= ' (' . substr($sha, 0, 7) . ')';
 			}
 
@@ -567,13 +577,23 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 	}
 
 	/**
-	 * Clear all session-cached versions data.
+	 * Clear only the transient version-list caches (module directory data,
+	 * core branch list, login-hook snapshot).
 	 *
-	 * Called by executeInstall(), executeRefresh() and executeGithubRefresh()
-	 * to invalidate stale results.
+	 * Leaves permanent SHA baselines (installedSha, remoteShaLastGood) and
+	 * commit-date caches untouched — those are per-module state, not list
+	 * caches, and must survive routine refreshes.
+	 *
+	 * Full wildcard deletion (self::CACHE_PREFIX . '*') is reserved for
+	 * uninstall/upgrade and the explicit "Clear cache" config action.
+	 *
+	 * Called by executeModuleDownload() and executeInstall() to invalidate
+	 * stale results after a module or core upgrade.
 	 */
-	public function clearVersionsCache(): void {
-		$this->cache->delete(self::CACHE_PREFIX . '*');
+	public function clearVersionListCache(): void {
+		$this->cache->delete($this->cacheKey('branches'));
+		$this->cache->delete($this->cacheKey('moduleVersionsData'));
+		$this->cache->delete($this->cacheKey('loginHook'));
 	}
 
 	/**
@@ -593,6 +613,7 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 
 		$installs = [];
 		$rawInstalls = $raw['installs'] ?? [];
+		if(is_string($rawInstalls)) $rawInstalls = preg_split('/[\s,]+/', $rawInstalls);
 		if(is_array($rawInstalls)) {
 			foreach($rawInstalls as $installName) {
 				$installName = $this->toString($installName);
@@ -1002,23 +1023,19 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 		// Phase 2 — Fetch remote directory data
 		// ------------------------------------------------------------------
 		//
-		// Tries the 1‑hour WireCache first. On miss, chunks class names into
-		// batches of 100 and fetches metadata from the PW modules directory
-		// API via concurrent HTTP. Falls back to stale cache if the network
-		// request fails.
+		// Tries the 1‑hour WireCache first. On miss, chunks module class names into
+		// batches and fetches metadata from the PW modules directory API via concurrent HTTP.
+		// Falls back to stale cache if the network request fails.
 		//
 		// Output: $remoteModules (raw directory items)
 		// ------------------------------------------------------------------
 
-		// try cache first
 		$moduleDirCache = $this->cacheEntry('moduleVersionsData');
 		$data = $refresh ? null : $this->cache->get($moduleDirCache->name);
 		$remoteModules = [];
 
-		if(!is_array($data) || empty($data)) {
+		if(!is_array($data) || !isset($data['items']) || !is_array($data['items'])) {
 			$this->debug('Module directory cache miss; fetching modules list from ' . $this->toString($this->config->moduleServiceURL) . '...');
-			// no usable cache — build the full API URL by appending a comma-separated
-			// list of every module class name, then fetch data from the PW modules directory
 
 			$baseUrl =
 				$this->toString($this->config->moduleServiceURL) .
@@ -1028,57 +1045,34 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 				"&field=module_version,version,requires,urls" .
 				"&class_name=";
 
-			// split the module list into chunks so that the baseUrl length is not too large
-			$chunks = array_chunk(array_keys($localModules), self::MODULE_DIR_CHUNK_SIZE);
-			$fetchedItems = [];
-			$requests = [];
-			foreach($chunks as $chunkIndex => $chunk) {
-				$requests[$chunkIndex] = $baseUrl . implode(',', $chunk);
-			}
+			$http = new WireHttp();
+			$this->wire($http);
+			$http->setTimeout(self::TIMEOUT);
+			$http->setHeader('User-Agent', 'ProcessWireUpgrade');
+			$http->setHeader('Accept', 'application/json');
 
-			$http = $this->newHttpClient(github: false);
-			$timerDirectoryFetch = Debug::startTimer();
-			$responses = $http->getJSONMulti($requests);
-			$timeDirectoryFetch = Debug::stopTimer($timerDirectoryFetch);
+			$data = ['items' => []];
 
-			foreach($responses as $chunkIndex => $decoded) {
-				if(is_array($decoded) && isset($decoded['items']) && is_array($decoded['items'])) {
-					$fetchedItems = array_merge($fetchedItems, $decoded['items']);
-				} else {
-					$this->log("Module directory fetch chunk failed: index={$chunkIndex}");
+			foreach(array_chunk(array_keys($localModules), self::MODULE_DIR_CHUNK_SIZE) as $chunk) {
+				$chunkData = $http->getJSON($baseUrl . implode(',', $chunk));
+
+				if(!is_array($chunkData) || !isset($chunkData['items']) || !is_array($chunkData['items'])) {
+					$data = null;
+					break;
 				}
+
+				$data['items'] = array_merge($data['items'], $chunkData['items']);
 			}
 
-			if(empty($fetchedItems)) {
-				// Policy: directory API failures are non-fatal. Use stale cache when
-				// available; otherwise continue with local modules only.
-				$staleData = $this->cache->get($moduleDirCache->name);
-				if(is_array($staleData) && isset($staleData['items']) && is_array($staleData['items'])) {
-					$this->warning($this->_('Error retrieving data from ProcessWire modules directory; using cached data instead.'), true);
-					$this->debug('Module directory fetch failed; fell back to stale cache; items=' . count($staleData['items']));
-					$fetchedItems = $staleData['items'];
-				} else {
-					$this->error($this->_('Error retrieving data from ProcessWire modules directory.'), true);
-					$this->debug('Module directory fetch failed; continuing with local modules only');
-				}
-			} else {
-				$this->cache->save($moduleDirCache->name, ['items' => $fetchedItems], $moduleDirCache->ttl);
-				$this->debug(
-					'Module directory fetched; chunks=' . count($requests) .
-					'; modules=' . count($fetchedItems) .
-					'; elapsed=' . $timeDirectoryFetch
-				);
-			}
-
-			$remoteModules = $fetchedItems;
-		} else {
-			// cache hit
-			if(isset($data['items']) && is_array($data['items'])) {
+			if(is_array($data)) {
+				$this->cache->save($moduleDirCache->name, $data, $moduleDirCache->ttl);
 				$remoteModules = $data['items'];
-				$this->debug('Module directory cache hit; items=' . count($remoteModules));
 			} else {
-				$this->debug('Module directory cache data invalid; continuing with local modules only');
+				$this->error($this->_('Error retrieving data from ProcessWire modules directory.'), true);
 			}
+		} else {
+			$this->debug('Module directory cache hit; items=' . count($data['items']));
+			$remoteModules = $data['items'];
 		}
 
 		$newVersions = [];
@@ -1422,7 +1416,7 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 
 		if(!$refresh) {
 			$branches = $this->cache->get($this->cacheKey('branches'));
-			if(is_array($branches) && count($branches)) {
+			if(is_array($branches) && isset($branches[self::BRANCH_MASTER], $branches[self::BRANCH_DEV])) {
 				$timeTotal = Debug::stopTimer($timerTotal);
 				$this->debug('Get core branches finished, cache hit; branches=' . count($branches) . '; elapsed=' . $timeTotal);
 				/** @var array<string, CoreBranch> $branches */
@@ -1622,7 +1616,11 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 			return ($priority[$a] ?? 99) <=> ($priority[$b] ?? 99);
 		});
 
-		$this->cache->save($this->cacheKey('branches'), $branches, $this->cacheTtl('branches'));
+		if(isset($branches[self::BRANCH_MASTER], $branches[self::BRANCH_DEV])) {
+			$this->cache->save($this->cacheKey('branches'), $branches, $this->cacheTtl('branches'));
+		} else {
+			$this->debug('Core branch fetch incomplete; skipping branches cache save; branches=' . implode(',', array_keys($branches)));
+		}
 
 		$timeTotal = Debug::stopTimer($timerTotal);
 		$this->debug(

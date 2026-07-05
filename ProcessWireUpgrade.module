@@ -32,7 +32,7 @@ class ProcessWireUpgrade extends Process {
 		return [
 			'title' => 'Upgrades',
 			'summary' => 'Tool that helps you identify and install core and module upgrades.',
-			'version' => 15,
+			'version' => 16,
 			'author' => 'Ryan Cramer, Matjaž Potočnik, AI',
 			'href' => 'https://github.com/matjazpotocnik/ProcessWireUpgrade',
 			//'href' => 'https://processwire.com/talk/topic/7525-module-processwire-core-upgrade/',
@@ -605,7 +605,7 @@ class ProcessWireUpgrade extends Process {
 				? sprintf($this->_('Module %s updated from GitHub (symlink preserved).'), $name)
 				: sprintf($this->_('Module %s updated from GitHub.'), $name);
 			$this->message($msg, true);
-			$this->checker->clearVersionsCache();
+			$this->checker->clearVersionListCache();
 
 			if($sha !== '') {
 				if($modules->isInstalled($name)) {
@@ -955,6 +955,24 @@ class ProcessWireUpgrade extends Process {
 			$indexNewFile = $cacheUpgradePath . 'index.php';
 		}
 
+		// Prevent stale prepared artifacts from a previous run from being reused silently.
+		// renameNow() returns success when the destination already exists, so without this
+		// guard the freshly extracted files could be discarded and temp files removed.
+		$existingPreparedTargets = [];
+		if(file_exists($wireNewPath)) $existingPreparedTargets[] = $wireNewPath;
+		if(file_exists($indexNewFile)) $existingPreparedTargets[] = $indexNewFile;
+		if(file_exists($htaccessNewFile)) $existingPreparedTargets[] = $htaccessNewFile;
+		if(!empty($existingPreparedTargets)) {
+			$labels = [];
+			foreach($existingPreparedTargets as $path) {
+				$labels[] = str_replace($config->paths->root, '/', $path);
+			}
+			$this->abort(
+				$this->_('Existing prepared upgrade files were found. Remove them first and run Prepare again to avoid using stale files.') .
+				' ' . implode(', ', $labels)
+			);
+		}
+
 		// renameNow() aborts internally on wire failure (fatal).
 		// index.php/htaccess.txt rename failures leave old files in place — safe to continue and clean up temp.
 		$this->renameNow($wireTempPath, $wireNewPath);
@@ -1128,7 +1146,7 @@ class ProcessWireUpgrade extends Process {
 
 		// Clear the session version cache so the redirect back to ./ picks up the
 		// newly installed version from $config->version instead of the stale pre-install data.
-		$this->checker->clearVersionsCache();
+		$this->checker->clearVersionListCache();
 		$this->log("Core upgrade completed; old=$oldVersion; new=$newVersion; components=" . implode(',', $selected));
 
 		$out =
@@ -1142,8 +1160,7 @@ class ProcessWireUpgrade extends Process {
 	/**
 	 * Check if a module path uses symlinks and return its resolved real path.
 	 *
-	 * This detects both a symlink on the module directory itself and any symlinked
-	 * ancestor between /site/modules/ and the module path.
+	 * This detects a symlink on the module directory itself.
 	 * Used by executeModuleDownload() when processWireUpgradePreserveSymlinks is enabled.
 	 *
 	 * @param string $name Module class name
@@ -1573,12 +1590,14 @@ class ProcessWireUpgrade extends Process {
 	 * Install
 	 */
 	public function ___install(): void {
+		if(!function_exists('curl_multi_init')) {
+			throw new WireException($this->_('ProcessWireUpgrade requires the PHP cURL extension (ext-curl). Please enable ext-curl and install the module again.'));
+		}
+
 		$page = new Page();
 		$page->template = 'admin';
 		$page->name = self::PAGE_NAME;
 
-		// installs to the admin "Setup" menu ... change as you see fit
-		//MP: https://github.com/ryancramerdesign/ProcessWireUpgrade/pull/34/commits/9e9f172b348001f6ad2d259dbe7d2d936f7ef2a5
 		$page->parent = $this->pages->get($this->config->adminRootPageID)->child('name=setup, include=all');
 		$page->process = $this;
 
@@ -1605,6 +1624,7 @@ class ProcessWireUpgrade extends Process {
 		}
 
 		wireRmdir($this->tempPath, true);
+		wireRmdir($this->cachePath, true);
 		$this->cache->delete(self::CACHE_PREFIX . '*');
 		$this->session->removeAllFor('ProcessWireUpgrade');
 		$this->session->removeAllFor('ProcessWireUpgradeCheck');

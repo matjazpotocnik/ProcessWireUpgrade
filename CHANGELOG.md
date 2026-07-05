@@ -1,5 +1,14 @@
 # Changelog
 
+## [v16] - 2026-07-05
+
+### Fixed
+- Fix login notifications to include child-module upgrades
+- Fix WireHttpMulti class bug
+- Replace concurrent `WireHttpMulti` with sequential `WireHttp::getJSON()` per chunk, preventing partial-data cache corruption
+- Require both `master` and `dev` branches before reading or saving cached core branch data
+- Code simplification and other fixes
+
 ## [v15] - 2026-07-05
 
 ### Added

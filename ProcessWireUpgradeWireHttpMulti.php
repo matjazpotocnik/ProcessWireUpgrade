@@ -229,7 +229,7 @@ class WireHttpMulti extends WireHttp {
 
 		$mh = curl_multi_init();
 
-		/** @var array<int, array{handle: \CurlHandle, spec: WireHttpRequestSpec, fileHandle: resource|null, seq: int}> $active */
+		/** @var array<int, array{handle: \CurlHandle, spec: WireHttpRequestSpec, fileHandle: resource|null, seq: int}> $active Keyed by spl_object_id() of the handle, not a cast — CurlHandle objects have no numeric conversion. */
 		$active = [];
 		$pool   = $this->queue;
 		$this->queue = [];
@@ -242,7 +242,7 @@ class WireHttpMulti extends WireHttp {
 			$seq = $nextSeq++;
 			$row = $this->spawn($mh, $nextSpec, $seq);
 			if ($row !== null) {
-				$active[(int) $row['handle']] = $row;
+				$active[spl_object_id($row['handle'])] = $row;
 			} else {
 				$this->resultsBySeq[$seq] ??= $this->buildSpawnFailureResult($nextSpec);
 			}
@@ -255,7 +255,7 @@ class WireHttpMulti extends WireHttp {
 			while (($info = curl_multi_info_read($mh)) !== false) {
 				if (isset($info['handle']) && $info['handle'] instanceof \CurlHandle) {
 					$ch = $info['handle'];
-					$id = (int) $ch;
+					$id = spl_object_id($ch);
 					if (isset($active[$id])) {
 						$this->resultsBySeq[$active[$id]['seq']] ??= $this->finalize($active[$id]);
 						curl_multi_remove_handle($mh, $ch);
@@ -275,7 +275,7 @@ class WireHttpMulti extends WireHttp {
 					$seq = $nextSeq++;
 					$row = $this->spawn($mh, $nextSpec, $seq);
 					if ($row !== null) {
-						$active[(int) $row['handle']] = $row;
+						$active[spl_object_id($row['handle'])] = $row;
 					} else {
 						$this->resultsBySeq[$seq] ??= $this->buildSpawnFailureResult($nextSpec);
 					}
@@ -295,7 +295,7 @@ class WireHttpMulti extends WireHttp {
 
 		// Defensive: ensures no handle leaks on unexpected cURL state (e.g. handles
 		// that completed but weren't picked up by curl_multi_info_read).
-		/** @var array<int, array{handle: \CurlHandle, spec: WireHttpRequestSpec, fileHandle: resource|null, seq: int}> $active */
+		/** @var array<int, array{handle: \CurlHandle, spec: WireHttpRequestSpec, fileHandle: resource|null, seq: int}> $active Keyed by spl_object_id() of the handle, not a cast — CurlHandle objects have no numeric conversion. */
 		foreach ($active as $row) {
 			$this->resultsBySeq[$row['seq']] ??= $this->finalize($row);
 			curl_multi_remove_handle($mh, $row['handle']);
