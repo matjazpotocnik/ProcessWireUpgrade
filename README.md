@@ -1,73 +1,121 @@
 # ProcessWire Upgrade
 
-Provides core and module upgrade notifications and optionally
-installation from the admin. 
+ProcessWire Upgrade shows available core and module updates in the admin and lets you install them from one place.
 
-Can be used to upgrade your ProcessWire core or any module that
-is available from <https://processwire.com/modules/>.
+This fork adds GitHub-based commit tracking for unreleased updates, direct GitHub installs for modules that are not in the official directory, optional listing of uninstalled modules, and an option to preserve symlinked module folders during GitHub downloads.
 
-## Please note before using this tool
+## What It Does
 
-Files installed by this tool are readable and writable by Apache,
-which may be a security problem in some hosting environments. 
-Especially shared hosting environments where Apache runs as the
-same user across all hosting accounts. If in doubt, you should
-instead install core upgrades and/or modules and module upgrades
-manually through your hosting account (FTP, SSH, etc.), which
-is already very simple to do. This ensures that any installed files 
-are owned and writable by your user account rather than Apache.
+- Checks the ProcessWire core for newer versions on the `master` and `dev` branches
+- Checks installed modules against the official ProcessWire modules directory
+- Can also check GitHub for unreleased commits after the latest tagged version
+- Lets you download and install modules directly from GitHub when a repository is available
+- Can show uninstalled modules that are present in `/site/modules/`
+- Groups parent and child modules together when one module installs another
+- Guides you through core upgrades step by step, including optional database backup and rollback-safe file handling
 
-Even if you don't use this tool to install the upgrades, this tool
-is still useful in identifying when upgrades are available. 
+## Requirements
 
-## Core Upgrades
+- PHP 8.2 or newer
+- ProcessWire 3.0.246 or newer
+- `ZipArchive` PHP extension for installing core upgrades
+- A ProcessWire modules directory API key (`$config->moduleServiceKey`)
 
-This tool checks if upgrades are available for your ProcessWire installation. 
-If available, it will download the update. If your file system is
-writable, it will install the update for you. If your file system is
-not writable, then it will install upgrade files in a writable 
-location (under /site/assets/cache/) and give you instructions on 
-what files to move. 
+## Installation
 
-Options to upgrade from the master or dev branch are available. 
-Additionally, you can upgrade to the latest commit (SHA) on the dev branch
-for bleeding-edge updates.
+1. Copy the module folder into `/site/modules/`
+2. In the admin, go to Modules -> Refresh
+3. Install `ProcessWireUpgrade`
+4. Its companion module, `ProcessWireUpgradeCheck`, installs automatically
+5. A new **Upgrades** page appears under Setup
 
-This tool makes versioned backup copies of any files it 
-overwrites during the upgrade. Should an upgrade fail for some
-reason, you can manually restore from the backups should you
-need to. 
+## Using It
 
-After installing a core upgrade, you may want to manually update
-the permissions of installed files to be non-writable depending,
-on your environment. 
+Go to **Setup -> Upgrades**.
 
+The first time you open the page, the module loads the current core and module version data. After that, it shows a table with one row per core branch or module and a status label such as:
 
-## Module Upgrades
+- **Upgrade** - a newer version is available
+- **Download** - a module is not installed yet, but a GitHub download is available
+- **Sync** - the version number has not changed, but GitHub has newer commits
+- **Unavailable** - an update exists but no download URL is available
+- **Up-to-date** - nothing to do
+- **Not in directory** - shown only when debug mode is enabled for modules that have no directory entry
 
-Uses web services from modules.processwire.com to compare your
-current installed versions of modules to the latest remote 
-versions available. Provides upgrade links when it finds newer
-versions of modules you have installed. 
+Click the action link in the **Status** column to install or download.
 
-For modules hosted on GitHub, it can also detect and offer updates
-to the latest commit (SHA) even if no new version has been tagged,
-allowing for bleeding-edge module updates.
+## Refreshing and GitHub Tracking
+
+There are two refresh actions:
+
+- **Refresh Core & Modules List** - reloads the core and module list from the directory and GitHub where needed
+- **Check GitHub for Updates** - refreshes and also checks for unreleased GitHub commits
+
+If GitHub tracking is enabled, the module stores a baseline SHA for installed modules and compares future checks against it. That lets it detect unreleased updates even when the version number has not changed yet.
+
+A GitHub token is strongly recommended if you check many modules often. Without one, you may hit the unauthenticated rate limit.
 
 ## GitHub API Authentication
 
-To increase the rate limit for GitHub API requests (from 60 to 5,000 requests per hour), you can optionally set a GitHub personal access token in your `/site/config.php` file:
+To increase the rate limit for GitHub API requests from 60 to 5,000 per hour, add a personal access token to your `/site/config.php` file:
 
 ```php
 $config->githubToken = 'your_github_token_here';
 ```
 
 To create a token:
+
 1. Go to [GitHub Settings > Developer settings > Personal access tokens](https://github.com/settings/tokens)
 2. Click "Generate new token (classic)"
-3. Give it a descriptive name (e.g., "ProcessWire Upgrade Module")
-4. Select the `public_repo` scope (read access to public repositories)
+3. Give it a descriptive name, such as "ProcessWire Upgrade Module"
+4. Select the `public_repo` scope for read access to public repositories
 5. Click "Generate token"
-6. Copy the token and add it to your `/site/config.php` as shown above
+6. Copy the token into your `/site/config.php` file as shown above
 
-This is optional but recommended if you frequently check for updates or have many GitHub-hosted modules, as it prevents hitting the rate limit.
+This is optional, but recommended if you frequently check for updates or have many GitHub-hosted modules.
+
+## Settings
+
+Open the configuration for `ProcessWireUpgradeCheck` in the ProcessWire admin to access these options:
+
+- **Check for upgrades on superuser login?** - runs upgrade checks automatically on superuser login
+- **Prioritize Local GitHub URLs?** - uses the module info `href` instead of the directory repository URL when available
+- **Check Uninstalled Modules?** - includes modules that are present in `/site/modules/` but not installed
+- **Clear cache?** - clears cached version and GitHub data
+
+## Advanced Configuration
+
+These settings are optional and go in `/site/config.php`.
+
+```php
+// GitHub API token - increases the API rate limit
+$config->githubToken = 'your_github_token_here';
+
+// Preserve symlinked module folders during GitHub downloads
+// When enabled, downloads are written to the real path target instead of replacing the symlink.
+$config->processWireUpgradePreserveSymlinks = true;
+
+// Show extra debug information and local-only modules
+$config->processWireUpgradeDebug = true;
+```
+
+## Notes
+
+- If a module is installed through a symlinked folder and preserve-symlinks is enabled, GitHub downloads are written to the real target path
+- If a module is listed as **Unavailable**, it must be updated manually
+- Core upgrades are handled separately from module upgrades and may include a database backup step
+
+## Troubleshooting
+
+- **GitHub authentication failed** - update `$config->githubToken`
+- **GitHub is temporarily limiting requests** - wait for the rate limit to reset or add a token
+- **A module is missing from the directory** - enable debug mode to see local-only modules
+- **A symlinked module folder is being replaced** - enable `$config->processWireUpgradePreserveSymlinks`
+
+## Credits
+
+Originally authored by Ryan Cramer.
+
+This fork adds GitHub commit tracking, direct GitHub installs, optional uninstalled-module checks, symlink-preserving downloads, and additional admin UI improvements.
+
+License: MPL 2.0, same as ProcessWire core.

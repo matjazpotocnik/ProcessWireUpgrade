@@ -1,31 +1,37 @@
 # Changelog
 
+## [v15] - 2026-07-05
+
+### Added
+- Show uninstalled modules in the upgrade list when enabled
+- Preserve symlinked module folders by downloading into the realpath target
+
 ## [v14] - 2026-05-13
 
 ### Added
-- Config setting in the module setup to select Source for GitHub repo URL - can come from module info array or from PW modules directory
-- Last module updated date
+- Add a setting to choose the GitHub repo URL source: the module info array or the ProcessWire modules directory
+- Show the last module updated date in the admin UI
 
 ## [v13] - 2026-05-10
 
 ### Added
-- Support for updating to the latest SHA commit for both ProcessWire core (dev-latest branch) and modules from GitHub repositories
+- Add GitHub SHA tracking to detect unreleased commits for ProcessWire core and GitHub-hosted modules
 
 ### Fixed
-- Fixed PHPStan static analysis errors (level max) across ProcessWireUpgradeCheck.module and ProcessWireUpgrade.module
-- Updated PHPDoc annotations to match actual return types
-- Added type-safe `toString()` helper method for consistent mixed-to-string conversion
-- Sanitized user input 
-- Optimized code flow
-- Simplified long expressions and variable reuse for better readability
-- Raised minimum PHP and PW version
+- Fix PHPStan static analysis errors across ProcessWireUpgradeCheck.module and ProcessWireUpgrade.module
+- Update PHPDoc annotations to match actual return types
+- Add a type-safe `toString()` helper for consistent mixed-to-string conversion
+- Sanitize user input
+- Simplify code flow
+- Shorten long expressions and unnecessary variable reuse
+- Raise the minimum PHP and ProcessWire version requirements
 
 ## [v12] - 2023-03-26 (Forked Version)
 
 ### Changed
-- Version bump to v12
-- Added logging
-- Use $files->rename($old, $new) - on windows, PHP rename() can fail with access denied if folder is locked, eg. explorer is opened in the directory. $files->rename() will try to copy if rename fails, since PW 3.0.178
+- Bump the module to v12
+- Add logging
+- Use $files->rename($old, $new) because PHP rename() can fail on Windows when a folder is locked; $files->rename() falls back to copy in PW 3.0.178+
 
 ## [Unreleased] - 2021-04-22 (Original)
 
