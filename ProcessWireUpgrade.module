@@ -323,7 +323,22 @@ class ProcessWireUpgrade extends Process {
 
 					// Clean version bump or standard fallback -> Upgrade
 					else {
-						$upgradeURL = $config->urls->admin . 'module/?update=' . urlencode($name);
+						// When symlink preservation is enabled and this module uses a
+						// junction/symlink, route through our own module-download handler
+						// which passes the realpath to backupDir(), preventing core from
+						// destroying the junction/symlink during backup.
+						$preserveSymlinks = (bool) $config->get('processWireUpgradePreserveSymlinks');
+						$realModulePath = $preserveSymlinks ? $this->getSymlinkedModulePath($name) : false;
+
+						if($realModulePath !== false && !empty($item['urls']['repo'])) {
+							$upgradeURL = './module-download?name=' . urlencode($name) .
+														'&repo=' . urlencode($item['urls']['repo']);
+							if(!empty($item['sha'])) {
+								$upgradeURL .= '&sha=' . urlencode($item['sha']);
+							}
+						} else {
+							$upgradeURL = $config->urls->admin . 'module/?update=' . urlencode($name);
+						}
 						$upgradeLabel = $this->_('Upgrade');
 						$labelCounts['Upgrade']++;
 					}
@@ -598,9 +613,24 @@ class ProcessWireUpgrade extends Process {
 			$downloadDestinationDir = $realModulePath;
 		}
 
+		$this->log(sprintf(
+			'Symlink debug: name=%s; preserveSymlinks=%d; realModulePath=%s; downloadDestinationDir=%s',
+			$name,
+			$preserveSymlinks ? 1 : 0,
+			$realModulePath !== false ? $realModulePath : '(none)',
+			$downloadDestinationDir !== '' ? $downloadDestinationDir : '(auto)'
+		));
+
 		/** @var ProcessModule $processModule */
 		$processModule = $modules->get('ProcessModule');
 		$destinationDir = $processModule->installer()->downloadModule($zipUrl, $downloadDestinationDir);
+
+		$this->log(sprintf(
+			'Symlink debug result: name=%s; destinationDir=%s; realModulePath=%s',
+			$name,
+			$destinationDir !== false && $destinationDir !== '' ? $destinationDir : 'false',
+			$realModulePath !== false ? $realModulePath : '(none)'
+		));
 
 		if($destinationDir) {
 			$msg = $realModulePath !== false
