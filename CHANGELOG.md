@@ -1,5 +1,14 @@
 # Changelog
 
+## [v17] - 2026-07-06
+
+### Fixed
+- Fix SHA-based Sync/Upgrade being offered when local version is ahead of remote version (downgrade guard)
+- Prevent parent-promotion from overriding a parent's ahead-of-remote status when a child has SHA changes
+
+### Added
+- Support symlinked module upgrades by routing through `./module-download?name=...` when symlink preservation is enabled, preventing core's installer from destroying the junction/symlink during backup
+
 ## [v16] - 2026-07-05
 
 ### Fixed

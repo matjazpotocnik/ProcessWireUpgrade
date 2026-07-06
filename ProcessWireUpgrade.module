@@ -32,7 +32,7 @@ class ProcessWireUpgrade extends Process {
 		return [
 			'title' => 'Upgrades',
 			'summary' => 'Tool that helps you identify and install core and module upgrades.',
-			'version' => 16,
+			'version' => 17,
 			'author' => 'Ryan Cramer, Matjaž Potočnik, AI',
 			'href' => 'https://github.com/matjazpotocnik/ProcessWireUpgrade',
 			//'href' => 'https://processwire.com/talk/topic/7525-module-processwire-core-upgrade/',
@@ -264,8 +264,10 @@ class ProcessWireUpgrade extends Process {
 			$upgradeLabel = $this->_('Up-to-date');
 			$upgradeURL = '';
 
-			// Check if any child module needs an update — promote parent to trigger Upgrade/Sync
-			if(!empty($item['childModules']) && is_array($item['childModules'])) {
+			// Check if any child module needs an update — promote parent to trigger Upgrade/Sync.
+			// Only promote when the parent isn't already ahead of the remote version;
+			// otherwise the download would be a downgrade even if the child has newer commits.
+			if($new >= 0 && !empty($item['childModules']) && is_array($item['childModules'])) {
 				foreach($item['childModules'] as $childData) {
 					if(intval($this->toString($childData['new'] ?? '')) > 0) {
 						$new = 1;

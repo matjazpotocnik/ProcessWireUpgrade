@@ -71,7 +71,7 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 		return [
 			'title' => 'Upgrades Checker',
 			'summary' => 'Detects core and module upgrades including unreleased GitHub commits, with progressive AJAX checks, SHA baselines, and resilient fallback caching.',
-			'version' => 13,
+			'version' => 14,
 			'autoload' => 'template=admin',
 			'singular' => true,
 			'href' => 'https://github.com/matjazpotocnik/ProcessWireUpgrade',
@@ -1271,6 +1271,13 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 
 				$localVersion = $this->toString($localModules[$name]['local'] ?? '');
 				if(!$this->checkShaUpgrade($name, $localVersion, $remoteShaData)) continue;
+
+				// Don't promote to Sync/Upgrade if the local version already exceeds
+				// the remote directory version — the SHA may be ahead for legitimate
+				// reasons (e.g. newer local dev commits) but downloading the older
+				// remote would be a downgrade.
+				$currentNew = (int) ($localModules[$name]['new'] ?? 0);
+				if($currentNew === -1) continue;
 
 				// New commits found since baseline — mark as silent upgrade
 				$localModules[$name]['new'] = 1;

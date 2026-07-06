@@ -44,6 +44,8 @@ The first time you open the page, the module loads the current core and module v
 
 Click the action link in the **Status** column to install or download.
 
+> **Important**: All GitHub downloads (Sync, Download for uninstalled modules, and symlink-preserving Upgrade) are routed through `./module-download?name=...`. This requires `$config->moduleInstall('download', true);` in `/site/config.php`. Without it, the installer will reject downloads from non-official URLs. See [Advanced Configuration](#advanced-configuration).
+
 ## Refreshing and GitHub Tracking
 
 There are two refresh actions:
@@ -90,6 +92,11 @@ These settings are optional and go in `/site/config.php`.
 ```php
 // GitHub API token - increases the API rate limit
 $config->githubToken = 'your_github_token_here';
+
+// Required for all GitHub downloads (Sync, Download for uninstalled modules,
+// and symlink-preserving Upgrade). Without this, ProcessWire's module installer
+// will reject downloads from non-official URLs.
+$config->moduleInstall('download', true);
 
 // Preserve symlinked module folders during GitHub downloads
 // When enabled, downloads are written to the real path target instead of replacing the symlink.
