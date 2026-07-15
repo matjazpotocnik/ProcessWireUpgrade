@@ -1,5 +1,14 @@
 # Changelog
 
+## [v18] - 2026-07-15
+
+### Fixed
+- Fix module classification bug where installed modules could be offered as uninstalled downloads
+- Code cleanup
+
+### Changed
+- Simplify refresh button and checkbox UI, improve config labels
+
 ## [v17] - 2026-07-06
 
 ### Fixed

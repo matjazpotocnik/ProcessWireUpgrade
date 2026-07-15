@@ -40,6 +40,7 @@ The first time you open the page, the module loads the current core and module v
 - **Sync** - the version number has not changed, but GitHub has newer commits
 - **Unavailable** - an update exists but no download URL is available
 - **Up-to-date** - nothing to do
+- **Up-to-date+** - your local version is newer than the one in the directory (common with forks or dev builds)
 - **Not in directory** - shown only when debug mode is enabled for modules that have no directory entry
 
 Click the action link in the **Status** column to install or download.
@@ -48,10 +49,9 @@ Click the action link in the **Status** column to install or download.
 
 ## Refreshing and GitHub Tracking
 
-There are two refresh actions:
+Click the **Refresh Core & Modules List** button (top-right of the upgrades page) to reload core and module version data from the ProcessWire directory.
 
-- **Refresh Core & Modules List** - reloads the core and module list from the directory and GitHub where needed
-- **Check GitHub for Updates** - refreshes and also checks for unreleased GitHub commits
+A checkbox below the table lets you toggle GitHub module tracking on or off before each refresh. When enabled, the module also checks GitHub for unreleased commits after the latest tagged version and shows a **Last Commit** column with the date of the most recent activity. The tracking state is saved persistently, so the checkbox retains its setting across page loads.
 
 If GitHub tracking is enabled, the module stores a baseline SHA for installed modules and compares future checks against it. That lets it detect unreleased updates even when the version number has not changed yet.
 
@@ -80,9 +80,10 @@ This is optional, but recommended if you frequently check for updates or have ma
 
 Open the configuration for `ProcessWireUpgradeCheck` in the ProcessWire admin to access these options:
 
-- **Check for upgrades on superuser login?** - runs upgrade checks automatically on superuser login
+- **Check for upgrades on login?** - runs upgrade checks automatically on superuser login
 - **Prioritize Local GitHub URLs?** - uses the module info `href` instead of the directory repository URL when available
 - **Check Uninstalled Modules?** - includes modules that are present in `/site/modules/` but not installed
+- **Enable GitHub module tracking?** - checks GitHub for unreleased commits after the latest tagged version and shows a **Last Commit** column with the date of the most recent activity; also enables **Sync** actions that download directly from GitHub when the version number has not changed but newer commits exist
 - **Clear cache?** - clears cached version and GitHub data
 
 ## Advanced Configuration

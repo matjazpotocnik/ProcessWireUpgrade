@@ -21,6 +21,7 @@ require_once __DIR__ . '/ProcessWireUpgradeWireHttpMulti.php';
  * @property bool $useLoginHook
  * @property bool $useModuleInfoRepo
  * @property bool $showUninstalled
+ * @property bool $githubTrackingEnabled
  *
  * @phpstan-type ModuleUpgradeInfo array{
  * title: string,
@@ -71,7 +72,7 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 		return [
 			'title' => 'Upgrades Checker',
 			'summary' => 'Detects core and module upgrades including unreleased GitHub commits, with progressive AJAX checks, SHA baselines, and resilient fallback caching.',
-			'version' => 14,
+			'version' => 15,
 			'autoload' => 'template=admin',
 			'singular' => true,
 			'href' => 'https://github.com/matjazpotocnik/ProcessWireUpgrade',
@@ -84,9 +85,6 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 
 	const TIMEOUT = 10;
 	const CONCURRENCY = 10;
-
-	/** Maximum modules per PW directory API request chunk */
-	const MODULE_DIR_CHUNK_SIZE = 100;
 
 	const REPO = 'processwire/processwire';
 
@@ -132,14 +130,13 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 	];
 
 	public function __construct() {
-
 		$this->set('useLoginHook', '0');
 		$this->set('useModuleInfoRepo', '0');
 		$this->set('showUninstalled', '0');
+		$this->set('githubTrackingEnabled', '0');
 	}
 
 	public function init(): void {
-
 		if($this->useLoginHook) {
 			$this->session->addHookAfter('login', $this, 'loginHook');
 		}
@@ -149,7 +146,6 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 	 * Reset per-request GitHub error state.
 	 */
 	protected function resetGitHubState(): void {
-
 		$this->gitHubState = '';
 	}
 
@@ -159,7 +155,6 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 	 * Returns empty string if no degraded GitHub checks were encountered.
 	 */
 	public function getGitHubRefreshWarning(): string {
-
 		if($this->gitHubState === '') return '';
 
 		if($this->gitHubState === 'rate') {
@@ -231,7 +226,6 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 	 * @return bool True if payload is usable, false if caller should abort
 	 */
 	private function isValidGitHubPayload(WireHttp $http, mixed $payload, string $repoId, bool $throw = false, string $url = '', string $context = 'GitHub data'): bool {
-
 		if(!is_array($payload) || !isset($payload['message']) || !is_string($payload['message'])) {
 			return true; // no GH API error payload detected
 		}
@@ -265,7 +259,6 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 	 * @return string ISO-8601 commit date string, or empty string on failure
 	 */
 	private function fetchCoreCommitDate(WireHttp $http, string $sha, string $commitUrl =''): string {
-
 		if($sha === '') return '';
 
 		$cachedDate = $this->toString($this->cache->get($this->cacheKey('coreCommitDate', $sha)));
@@ -288,21 +281,20 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 	}
 
 	/**
-	 * Returns true if at least one module SHA baseline has been established.
+	 * Returns true if at least one module or core dev SHA baseline has been established.
 	 *
-	 * Used to determine whether the GitHub check button should say "Check" or "Establish Baseline".
+	 * Can be used to decide whether "Last Commit" data is available for display.
 	 */
 	public function hasGitHubBaseline(): bool {
-
-		$info = $this->cache->getInfo(false, $this->cachePrefix('installedSha') . '*');
-		return !empty($info);
+		$moduleBaselines = $this->cache->getInfo(false, $this->cachePrefix('installedSha') . '*');
+		$coreDevBaseline = $this->cache->getInfo(false, $this->cachePrefix('installedCoreDevSha') . '*');
+		return !empty($moduleBaselines) || !empty($coreDevBaseline);
 	}
 
 	/**
 	 * Delete the last-good SHA fallback cache for a given repo URL.
 	 */
 	public function deleteLastGoodRemoteSha(string $repoUrl): void {
-
 		$gh = $this->parseGitHubUrl($repoUrl);
 
 		if(!$gh) {
@@ -327,7 +319,6 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 	 * @return array{sha: string, date: string}|false
 	 */
 	private function readCachedSha(string $cacheKey): array|false {
-
 		$cached = $this->cache->get($cacheKey);
 		if(!is_array($cached) || !isset($cached['sha'], $cached['date'])) return false;
 
@@ -344,7 +335,6 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 	 * @return bool True if a fallback SHA was found and applied, false if none exists.
 	 */
 	private function applyGitHubShaFallback(string $repoId, array &$results): bool {
-
 		$parts = explode('/', $repoId, 2);
 		$owner = $parts[0] ?? '';
 		$repo = $parts[1] ?? '';
@@ -374,7 +364,6 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 	 * @return array<string, array<string, string>>
 	 */
 	protected function getRepos(): array {
-
 		$apiBase = self::GH_API_BASE . 'repos/' . self::REPO;
 		$rawBase = self::GH_RAW_BASE . self::REPO;
 		$gitBase = self::GH_GIT_BASE . self::REPO;
@@ -391,12 +380,33 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 	}
 
 	/**
+	 * Attempt to fall back to the stale core-branches cache after a failed live fetch.
+	 *
+	 * The specific failure reason is already logged by the caller before this is invoked.
+	 *
+	 * @param string $timerTotal Timer key returned by Debug::startTimer()
+	 * @return array<string, CoreBranch>
+	 */
+	private function branchesFromStaleCache(string $timerTotal): array {
+		$staleBranches = $this->cache->get($this->cacheKey('branches'));
+		$timeTotal = Debug::stopTimer($timerTotal);
+
+		if(is_array($staleBranches) && count($staleBranches)) {
+			$this->debug('Get core branches finished; fell back to stale cache; elapsed=' . $timeTotal);
+			/** @var array<string, CoreBranch> $staleBranches */
+			return $staleBranches;
+		}
+
+		$this->debug('Get core branches finished; no stale cache; elapsed=' . $timeTotal);
+		return [];
+	}
+
+	/**
 	 * Check for upgrades at login (superuser only)
 	 *
 	 * @param null|HookEvent $e
 	 */
 	public function loginHook(?HookEvent $e = null): void {
-
 		if(!$this->user->isSuperuser()) return;
 
 		$cacheName = $this->cacheKey('loginHook');
@@ -496,7 +506,6 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 	 * @return array<string, ModuleUpgradeInfo>
 	 */
 	public function getVersions(bool $refresh = false, bool $checkSha = true): array {
-
 		$timerTotal = Debug::startTimer();
 		$this->debug(
 			'Version check started; refresh=' . ($refresh ? 'yes' : 'no') .
@@ -521,16 +530,18 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 		// core branches (master/dev) first
 		foreach($branches as $branchName => $branch) {
 			$name = "ProcessWire $branchName";
-			$remote = $branch['version'];
+			$remote = $this->toString($branch['version'] ?? '');
 
 			// version_compare($remote, $local) returns:
 			// 1 if $remote is newer, -1 if $local is newer, 0 if they are the same
 			$new = version_compare($remote, $local);
 
-			// Append SHA suffix only when dev is ahead of the installed version
-			$sha = $branch['sha'] ?? '';
-			if($branchName === self::BRANCH_DEV && $new > 0 && $sha !== '') {
-				$remote .= ' (' . substr($sha, 0, 7) . ')';
+			$sha = $this->toString($branch['sha'] ?? '');
+			if($branchName === self::BRANCH_DEV &&
+				$new === 0 && $sha !== '' &&
+				$this->checkCoreDevShaUpgrade($local, $sha)
+			) {
+				$new = 1;
 			}
 
 			$versions[$name] = array_merge($this->moduleUpgradeDefaults, $branch, [
@@ -604,7 +615,6 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 	 * @return ModuleUpgradeInfo|array{}
 	 */
 	protected function getModuleInfoVerbose(string $moduleName): array {
-
 		$raw = $this->modules->getModuleInfoVerbose($moduleName);
 		/** @var array<string, mixed> $raw */
 
@@ -671,11 +681,10 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 	 * @return array{owner: string, repo: string}|null Array with owner/repo, or null if not a GitHub URL
 	 */
 	protected function parseGitHubUrl(string $url): ?array {
-
 		if(!preg_match('~github\.com/([^/#?]+)/([^/#?\s]+)~i', $url, $m)) return null;
 
-		$owner = $m[1];
-		$repo =  $m[2];
+		$owner = strtolower($m[1]);
+		$repo =  strtolower($m[2]);
 
 		if (strncasecmp(substr($repo, -4), '.git', 4) === 0) {
 			$repo = substr($repo, 0, -4);
@@ -840,7 +849,6 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 	 * @return bool True if there is a newer commit on GitHub compared to the baseline, false otherwise
 	 */
 	protected function checkShaUpgrade(string $name, string $localVersion, array $remoteShaData): bool {
-
 		if($localVersion === '') return false;
 
 		$remoteSha = $this->toString($remoteShaData, 'sha');
@@ -855,7 +863,29 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 			// version string, and removing the wildcard delete avoids a race
 			// condition with concurrent requests.
 			$this->cache->save($shaKey, $remoteSha, $this->cacheTtl('installedSha'));
-			$this->debug("Established installed SHA baseline; module=$name; version=$localVersion; sha=" . substr($remoteSha, 0, 7));
+			$this->debug("Established installed SHA baseline; module=$name; version=$localVersion");
+			return false;
+		}
+
+		return $installedSha !== $remoteSha;
+	}
+
+	/**
+	 * Checks if core dev branch has newer commits than the installed baseline SHA.
+	 *
+	 * @param string $localVersion Installed core version
+	 * @param string $remoteSha Latest remote dev branch commit SHA
+	 * @return bool True when remote SHA differs from established baseline
+	 */
+	protected function checkCoreDevShaUpgrade(string $localVersion, string $remoteSha): bool {
+		if($localVersion === '' || $remoteSha === '') return false;
+
+		$shaKey = $this->cacheKey('installedCoreDevSha', $localVersion);
+		$installedSha = $this->toString($this->cache->get($shaKey));
+
+		if($installedSha === '') {
+			$this->cache->save($shaKey, $remoteSha, $this->cacheTtl('installedCoreDevSha'));
+			$this->debug("Established core dev SHA baseline; version=$localVersion");
 			return false;
 		}
 
@@ -1023,9 +1053,8 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 		// Phase 2 — Fetch remote directory data
 		// ------------------------------------------------------------------
 		//
-		// Tries the 1‑hour WireCache first. On miss, chunks module class names into
-		// batches and fetches metadata from the PW modules directory API via concurrent HTTP.
-		// Falls back to stale cache if the network request fails.
+		// Tries the 1‑hour WireCache first. On miss, fetch metadata from the PW
+		// modules directory API. Falls back to stale cache if the network request fails.
 		//
 		// Output: $remoteModules (raw directory items)
 		// ------------------------------------------------------------------
@@ -1037,13 +1066,13 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 		if(!is_array($data) || !isset($data['items']) || !is_array($data['items'])) {
 			$this->debug('Module directory cache miss; fetching modules list from ' . $this->toString($this->config->moduleServiceURL) . '...');
 
-			$baseUrl =
+			$url =
 				$this->toString($this->config->moduleServiceURL) .
 				"?apikey=" . $this->toString($this->config->moduleServiceKey) .
 				"&version=2" .
-				"&limit=" . self::MODULE_DIR_CHUNK_SIZE .
+				"&limit=200" .
 				"&field=module_version,version,requires,urls" .
-				"&class_name=";
+				"&class_name=" . implode(',', array_keys($localModules));
 
 			$http = new WireHttp();
 			$this->wire($http);
@@ -1051,24 +1080,19 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 			$http->setHeader('User-Agent', 'ProcessWireUpgrade');
 			$http->setHeader('Accept', 'application/json');
 
-			$data = ['items' => []];
+			$data = $http->getJSON($url);
 
-			foreach(array_chunk(array_keys($localModules), self::MODULE_DIR_CHUNK_SIZE) as $chunk) {
-				$chunkData = $http->getJSON($baseUrl . implode(',', $chunk));
-
-				if(!is_array($chunkData) || !isset($chunkData['items']) || !is_array($chunkData['items'])) {
-					$data = null;
-					break;
-				}
-
-				$data['items'] = array_merge($data['items'], $chunkData['items']);
-			}
-
-			if(is_array($data)) {
+			if(is_array($data) && isset($data['items']) && is_array($data['items'])) {
 				$this->cache->save($moduleDirCache->name, $data, $moduleDirCache->ttl);
 				$remoteModules = $data['items'];
 			} else {
-				$this->error($this->_('Error retrieving data from ProcessWire modules directory.'), true);
+				$cached = $this->cache->get($moduleDirCache->name);
+				if(is_array($cached) && isset($cached['items']) && is_array($cached['items'])) {
+					$this->debug('Module directory fetch failed; fell back to stale cache.');
+					$remoteModules = $cached['items'];
+				} else {
+					$this->error($this->_('Error retrieving data from ProcessWire modules directory.'), true);
+				}
 			}
 		} else {
 			$this->debug('Module directory cache hit; items=' . count($data['items']));
@@ -1282,13 +1306,9 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 				// New commits found since baseline — mark as silent upgrade
 				$localModules[$name]['new'] = 1;
 
-				$shaSuffix = ' (' . substr($remoteShaData['sha'], 0, 7) . ')';
 				if($this->toString($meta['type']) === 'local-only') {
-					$localModules[$name]['remote'] = $localVersion . $shaSuffix;
+					$localModules[$name]['remote'] = $localVersion;
 					$localModules[$name]['urls']   = ['repo' => $this->toString($meta['ghUrl'] ?? '')];
-				} else {
-					// directory: remote version already set (e.g. "1.0.3") — append sha suffix
-					$localModules[$name]['remote'] = $this->toString($localModules[$name]['remote']) . $shaSuffix;
 				}
 
 				$newVersions[$name] = $localModules[$name];
@@ -1375,8 +1395,7 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 			}
 
 			$this->debug("Debug mode: found {$localOnlyCount} local-only modules without remote directory entry");
-			}
-		
+		}
 
 		$timeTotal = Debug::stopTimer($timerTotal);
 		$this->log(
@@ -1478,34 +1497,11 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 				$error = $this->_('Error loading GitHub branches') . ' - ' . $branchesUrl;
 				$error .= ' - ' . $this->_('HTTP error(s):') . ' ' . $this->toString($http->getError());
 				if($throw) throw new WireException($error);
-
-				// Fall back to stale cache when non-throwing (e.g. during a user-triggered refresh).
-				$staleBranches = $this->cache->get($this->cacheKey('branches'));
-				if(is_array($staleBranches) && count($staleBranches)) {
-					$timeTotal = Debug::stopTimer($timerTotal);
-					$this->debug('Get core branches finished, HTTP error; fell back to stale cache; elapsed=' . $timeTotal);
-					/** @var array<string, CoreBranch> $staleBranches */
-					return $staleBranches;
-				}
-
-				$timeTotal = Debug::stopTimer($timerTotal);
-				$this->debug('Get core branches finished, HTTP error; no stale cache; elapsed=' . $timeTotal);
-				return [];
+				return $this->branchesFromStaleCache($timerTotal);
 			}
 			// Detect GitHub API error responses (rate limit, server error, etc.)
 			if(!$this->isValidGitHubPayload($http, $ghBranches, self::REPO, $throw, $branchesUrl, 'core branches')) {
-				// Fall back to stale cache when non-throwing.
-				$staleBranches = $this->cache->get($this->cacheKey('branches'));
-				if(is_array($staleBranches) && count($staleBranches)) {
-					$timeTotal = Debug::stopTimer($timerTotal);
-					$this->debug('Get core branches finished, GitHub payload error; fell back to stale cache; elapsed=' . $timeTotal);
-					/** @var array<string, CoreBranch> $staleBranches */
-					return $staleBranches;
-				}
-
-				$timeTotal = Debug::stopTimer($timerTotal);
-				$this->debug('Get core branches finished, GitHub payload error; no stale cache; elapsed=' . $timeTotal);
-				return [];
+				return $this->branchesFromStaleCache($timerTotal);
 			}
 
 			// ------------------------------------------------------------------
@@ -1598,6 +1594,7 @@ class ProcessWireUpgradeCheck extends WireData implements Module {
 					],
 				];
 
+				// future-proofing: when getRepos() returns multiple repos, this prefixes branch names with the repo key
 				if($repoName !== 'main') {
 					$name = "$repoName-$name";
 					$branch['name'] = $name;

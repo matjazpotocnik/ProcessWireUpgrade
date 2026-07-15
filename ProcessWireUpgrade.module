@@ -32,7 +32,7 @@ class ProcessWireUpgrade extends Process {
 		return [
 			'title' => 'Upgrades',
 			'summary' => 'Tool that helps you identify and install core and module upgrades.',
-			'version' => 17,
+			'version' => 18,
 			'author' => 'Ryan Cramer, Matjaž Potočnik, AI',
 			'href' => 'https://github.com/matjazpotocnik/ProcessWireUpgrade',
 			//'href' => 'https://processwire.com/talk/topic/7525-module-processwire-core-upgrade/',
@@ -73,12 +73,19 @@ class ProcessWireUpgrade extends Process {
 	protected array $renames = [];
 
 	/**
+	 * Pending core dev SHA baseline update — deferred to __destruct() so it
+	 * only commits after all deferred renames succeed.
+	 *
+	 * @var array{sha: string, version: string}|null
+	 */
+	protected ?array $pendingCoreDevSha = null;
+
+	/**
 	 * Instance of ProcessWireUpgradeCheck
 	 *
 	 * @var ProcessWireUpgradeCheck
 	 */
 	protected $checker;
-
 
 	/**
 	 * API wired
@@ -149,7 +156,6 @@ class ProcessWireUpgrade extends Process {
 	 * Performs basic checks (requirements, pending files, refresh status) before listing modules
 	 */
 	protected function preflight(): string {
-
 		if(!class_exists('\ZipArchive')) {
 			$this->warning(
 				"Your PHP does not have ZipArchive support. This is required to install core or module upgrades with this tool. " .
@@ -176,7 +182,11 @@ class ProcessWireUpgrade extends Process {
 		$lastRefresh = $this->session->getFor($this, 'lastModulesRefreshTime');
 
 		if(!$lastRefresh || $lastRefresh < (time() - self::REFRESH_THRESHOLD_HOURS * 3600)) {
-			$btn = $this->refreshButton();
+			/** @var InputfieldButton $btn */
+			$btn = $this->modules->get('InputfieldButton');
+			$btn->href = './refresh';
+			$btn->attr('onclick', "this.querySelector('i').className='fa fa-spinner fa-spin';this.style.pointerEvents='none';this.style.opacity='0.6'");
+			$btn->addClass('pw-upgrade-refresh-button');
 			$btn->value = $this->_('Continue');
 			$btn->icon = 'angle-right';
 			return
@@ -209,15 +219,42 @@ class ProcessWireUpgrade extends Process {
 		$preflight = $this->preflight();
 		if($preflight) return $preflight;
 
-		// Whether to include GitHub commit SHA checks for this request.
-		// Set by the user clicking "Check GitHub for updates" button.
-		$checkGitHubSha = (bool) $this->session->getFor($this, 'githubTrackingEnabled');
+		// Whether to include module GitHub SHA checks for this request.
+		// Core dev SHA tracking is handled unconditionally by the checker.
+		$checkGitHubSha = $this->checker->githubTrackingEnabled;
 
 		// Fetch all core branch and module version data, with optional SHA checks
 		$items = $this->checker->getVersions(false, $checkGitHubSha);
 
-		// Re-check after getVersions() in case this run just established baselines
-		$hasGitHubBaseline = $this->checker->hasGitHubBaseline();
+		// Control Last Commit column visibility from the current checkbox state
+		$showLastCommit = $checkGitHubSha;
+
+		// Sort by action priority first, then alphabetically by title.
+		// Core branches always stay first, with master before dev.
+		uasort($items, function(array $a, array $b): int {
+			$isCoreA = !empty($a['branch']);
+			$isCoreB = !empty($b['branch']);
+			if($isCoreA && $isCoreB) {
+				$coreRank = function(array $item): int {
+					$branch = $this->toString($item['branch'] ?? '');
+					return match($branch) {
+						'master' => 0,
+						'dev' => 1,
+						default => 2,
+					};
+				};
+
+				$rankA = $coreRank($a);
+				$rankB = $coreRank($b);
+				if($rankA !== $rankB) return $rankA <=> $rankB;
+			}
+			if($isCoreA !== $isCoreB) return $isCoreA ? -1 : 1;
+
+			$priorityA = $this->itemSortPriority($a);
+			$priorityB = $this->itemSortPriority($b);
+			if($priorityA !== $priorityB) return $priorityA <=> $priorityB;
+			return strcasecmp($this->toString($a['title']), $this->toString($b['title']));
+		});
 
 		/** @var MarkupAdminDataTable $table */
 		$table = $modules->get('MarkupAdminDataTable');
@@ -230,7 +267,7 @@ class ProcessWireUpgrade extends Process {
 			$this->_('Installed'),
 			$this->_('Latest'),
 		];
-		if($hasGitHubBaseline) {
+		if($showLastCommit) {
 			$headers[] = $this->_('Last Commit');
 		}
 		$headers[] = $this->_('Status');
@@ -241,9 +278,18 @@ class ProcessWireUpgrade extends Process {
 		// for debugging purposes
 		$labelCounts = ['Upgrade' => 0, 'Sync' => 0, 'Download' => 0, 'Unavailable' => 0, 'Up-to-date' => 0, 'Up-to-date+' => 0, 'Managed by' => 0, 'LocalOnly' => 0];
 
+		// Action label translations
+		$labels = [
+			'Upgrade' => $this->_('Upgrade'),
+			'Sync' => $this->_('Sync'),
+			'Download' => $this->_('Download'),
+			'Unavailable' => $this->_('Unavailable'),
+			'Up-to-date' => $this->_('Up-to-date'),
+			'Not in directory' => $this->_('Not in directory'),
+		];
+
 		// 1. Iterate items — each core branch or module becomes one table row
 		foreach($items as $name => $item) {
-
 			// Normalize item fields — type-cast, sanitize, set defaults
 			$local = (string) $item['local'];
 			$remote = (string) $item['remote'];
@@ -261,19 +307,14 @@ class ProcessWireUpgrade extends Process {
 			$class = !$installed ? 'not_installed' : '';
 			$urls = $item['urls'] ?? [];
 			$links = [];
-			$upgradeLabel = $this->_('Up-to-date');
+			$upgradeLabel = $labels['Up-to-date'];
 			$upgradeURL = '';
 
 			// Check if any child module needs an update — promote parent to trigger Upgrade/Sync.
 			// Only promote when the parent isn't already ahead of the remote version;
 			// otherwise the download would be a downgrade even if the child has newer commits.
-			if($new >= 0 && !empty($item['childModules']) && is_array($item['childModules'])) {
-				foreach($item['childModules'] as $childData) {
-					if(intval($this->toString($childData['new'] ?? '')) > 0) {
-						$new = 1;
-						break;
-					}
-				}
+			if($new >= 0 && $this->childNeedsUpdate($item)) {
+				$new = 1;
 			}
 
 			// 2. Determine default label — "Up-to-date" or local-ahead ("+")
@@ -287,61 +328,39 @@ class ProcessWireUpgrade extends Process {
 			if($new > 0 && !empty($remote)) {
 				$remote = $this->b($remote);
 
-				// 3a. Core branch -> Upgrade
+				$repo = $this->toString($item['urls']['repo'] ?? '');
+				$sha = $this->toString($item['sha'] ?? '');
+
+				// 3a. Core branch -> Upgrade, or Sync for dev SHA-only updates
 				if(!empty($branch)) {
 					$upgradeURL = './check?branch=' . urlencode($branch);
-					$upgradeLabel = $this->_('Upgrade');
-					$labelCounts['Upgrade']++;
+					$isCoreSync = ($branch === ProcessWireUpgradeCheck::BRANCH_DEV) && !$isVersionUpgrade && $sha !== '';
+					$upgradeLabel = $isCoreSync ? $labels['Sync'] : $labels['Upgrade'];
+					$labelCounts[$isCoreSync ? 'Sync' : 'Upgrade']++;
 				} // 3a.
 
 				// 3b. Uninstalled module -> Download or Unavailable
 				elseif(!$installed) {
-					if(!empty($item['urls']['repo'])) {
-						$upgradeURL = './module-download?name=' . urlencode($name) . '&repo=' . urlencode($item['urls']['repo']);
-						if(!empty($item['sha'])) $upgradeURL .= '&sha=' . urlencode($item['sha']);
-						$upgradeLabel = $this->_('Download');
+					if($repo !== '') {
+						$upgradeURL = $this->moduleDownloadUrl($name, $repo, $sha);
+						$upgradeLabel = $labels['Download'];
 						$labelCounts['Download']++;
 					} else {
-					// Failsafe: Cannot download uninstalled module without a repo URL
-					$upgradeLabel = $this->_('Unavailable');
-					$labelCounts['Unavailable']++;
+						$upgradeLabel = $labels['Unavailable'];
+						$labelCounts['Unavailable']++;
 					}
 				} // 3b.
 
 				// 3c. Installed module -> Sync or Upgrade
 				else {
-					// Version matches but unreleased commits on GitHub -> Sync.
-					// Promoted parents (those shown as needing update only because
-					// a child module needs one) are included: Sync from the shared
-					// repo brings in the child's updates without the parent having
-					// a version bump of its own.
-					if(!$isVersionUpgrade && !empty($item['sha']) && !empty($item['urls']['repo'])) {
-						$upgradeURL = './module-download?name=' . urlencode($name) .
-													'&repo=' . urlencode($item['urls']['repo']) .
-													'&sha=' . urlencode($item['sha']);
-						$upgradeLabel = $this->_('Sync');
-						$labelCounts['Sync']++;
-					}
-
-					// Clean version bump or standard fallback -> Upgrade
-					else {
-						// When symlink preservation is enabled and this module uses a
-						// junction/symlink, route through our own module-download handler
-						// which passes the realpath to backupDir(), preventing core from
-						// destroying the junction/symlink during backup.
-						$preserveSymlinks = (bool) $config->get('processWireUpgradePreserveSymlinks');
-						$realModulePath = $preserveSymlinks ? $this->getSymlinkedModulePath($name) : false;
-
-						if($realModulePath !== false && !empty($item['urls']['repo'])) {
-							$upgradeURL = './module-download?name=' . urlencode($name) .
-														'&repo=' . urlencode($item['urls']['repo']);
-							if(!empty($item['sha'])) {
-								$upgradeURL .= '&sha=' . urlencode($item['sha']);
-							}
-						} else {
-							$upgradeURL = $config->urls->admin . 'module/?update=' . urlencode($name);
-						}
-						$upgradeLabel = $this->_('Upgrade');
+					$isSync = !$isVersionUpgrade && $sha !== '' && $repo !== '';
+					if($isSync) {
+						$upgradeURL = $this->moduleDownloadUrl($name, $repo, $sha);
+						$upgradeLabel = $labels['Sync'];
+        		$labelCounts['Sync']++;
+					} else {
+						$upgradeURL = $config->urls->admin . 'module/?update=' . urlencode($name);
+						$upgradeLabel = $labels['Upgrade'];
 						$labelCounts['Upgrade']++;
 					}
 				} // 3c.
@@ -350,7 +369,7 @@ class ProcessWireUpgrade extends Process {
 
 			// 4. Local-only module — no remote directory entry (shown only in debug mode)
 			elseif(!empty($item['localOnly'])) {
-				$upgradeLabel = $this->_('Not in directory');
+				$upgradeLabel = $labels['Not in directory'];
 				$class .= ' local-only';
 				$labelCounts['LocalOnly']++;
 			} // 4.
@@ -401,7 +420,7 @@ class ProcessWireUpgrade extends Process {
 				$title = $this->a($upgradeURL, $title, $class) . $proLabel;
 				if($item['new'] > 0) {
 					$proSupportURL = !empty($urls['support']) ? $urls['support'] : $upgradeURL;
-					$protip = 'PRO module upgrade available in ProcessWire VIP support board (login required)';
+					$protip = $this->_('PRO module upgrade available in ProcessWire VIP support board (login required)');
 					$upgrade = $this->tooltip($protip, $this->aa($proSupportURL, $upgradeLabel));
 				}
 			} else {
@@ -423,7 +442,6 @@ class ProcessWireUpgrade extends Process {
 			if (isset($item['shaDate']) && is_string($item['shaDate']) && $item['shaDate'] !== '') {
 				$timestamp = strtotime($item['shaDate']);
 				if ($timestamp !== false) {
-					//$sha = substr($item['sha'], 0, 7);
 					$shaDate = "<span class='sr-only'>$timestamp </span>" . wireRelativeTimeStr($timestamp);
 				}
 			} // 10.
@@ -435,7 +453,7 @@ class ProcessWireUpgrade extends Process {
 				$local,
 				$remote,
 			];
-			if($hasGitHubBaseline) {
+			if($showLastCommit) {
 				$row[] = $shaDate;
 			}
 			$row[] = $upgrade;
@@ -461,7 +479,7 @@ class ProcessWireUpgrade extends Process {
 						$this->span($sanitizer->entities1($childLocal), 'detail'),
 						$this->span($sanitizer->entities1($childRemote), 'detail'),
 					];
-					if($hasGitHubBaseline) {
+					if($showLastCommit) {
 						$row[] = ''; // don't show SHA date to keep it clean
 					}
 					$row[] = $this->span($this->_('Managed by') . ' ' . $sanitizer->entities1($name), 'detail');
@@ -471,16 +489,6 @@ class ProcessWireUpgrade extends Process {
 				}
 			} // 12.
 		} // foreach
-
-		// Help text above buttons
-		$helpTextMessage = $hasGitHubBaseline
-			? $this->_('Refresh the core and module list, then check GitHub for new commits and releases.')
-			: $this->_('Refresh the core and module list, then initialize GitHub tracking to monitor for unreleased updates.');
-		$helpText = $this->p($helpTextMessage, 'help-text');
-
-		$githubBtnLabel = $hasGitHubBaseline
-			? $this->_('Check GitHub for Updates')
-			: $this->_('Initialize GitHub Tracking');
 
 		// Surface any GitHub API degradation from this request
 		$ghWarning = $this->checker->getGitHubRefreshWarning();
@@ -504,12 +512,40 @@ class ProcessWireUpgrade extends Process {
 
 		$summary = $this->renderStatsLine($labelCounts);
 
+		// Build a native ProcessWire form with header submit and checkbox.
+		/** @var InputfieldForm $form */
+		$form = $this->modules->get('InputfieldForm');
+		$form->method = 'post';
+		$form->action = './refresh';
+
+		/** @var InputfieldHidden $submitted */
+		$submitted = $this->modules->get('InputfieldHidden');
+		$submitted->name = 'refreshOptionsSubmitted';
+		$submitted->value = 1;
+		$form->add($submitted);
+
+		/** @var InputfieldSubmit $submit */
+		$submit = $this->modules->get('InputfieldSubmit');
+		$submit->name = 'refreshModules';
+		$submit->value = $this->_('Refresh Core & Modules List');
+		$submit->icon = 'refresh';
+		$submit->id = 'ProcessWireUpgradeRefresh';
+		$submit->attr('title', $this->_('Reloads the core and module list.'));
+		$submit->attr('onclick', "this.querySelector('i').className='fa fa-spinner fa-spin';this.style.pointerEvents='none';this.style.opacity='0.6'");
+		if(method_exists($submit, 'showInHeader')) $submit->showInHeader(true);
+		$form->add($submit);
+
+		$githubCheckboxHtml = "<div class='pw-github-tracking-row'>" .
+			$this->checkbox('githubTrackingEnabled', $this->_('Also check module GitHub updates.'), '', (bool) $this->checker->githubTrackingEnabled, 'ProcessWireUpgradeGithubTracking') .
+			"</div>";
+		$formHtml = $form->render();
+		$refreshForm = str_replace('</form>', $githubCheckboxHtml . '</form>', $formHtml);
+
 		return
-			$helpText .
 			$summary .
 			$this->lastRefreshInfo() .
 			$table->render() .
-			$this->p($this->refreshButton(true)->render() . ' ' . $this->githubCheckButton(true, $githubBtnLabel)->render());
+			$refreshForm;
 	}
 
 	/**
@@ -520,20 +556,38 @@ class ProcessWireUpgrade extends Process {
 		$timer = Debug::startTimer();
 		$this->session->setFor($this, 'lastModulesRefreshTime', time());
 
-		// Full refresh: re-scan local modules for newly installed/removed modules
+		$trackingEnabled = (bool) $this->checker->githubTrackingEnabled;
+		$optionsSubmitted = (bool) $this->input->post('refreshOptionsSubmitted');
+
+		if($optionsSubmitted) {
+			$trackingEnabled = (bool) $this->input->post('githubTrackingEnabled');
+			$this->modules->saveConfig('ProcessWireUpgradeCheck', 'githubTrackingEnabled', $trackingEnabled);
+
+			// Keep the already-instantiated checker in sync for this request.
+			$this->checker->githubTrackingEnabled = $trackingEnabled;
+		}
+
+		// Full refresh: re-scan local modules for newly installed/removed modules.
 		$this->modules->refresh();
 
-		// For a clean fallback state, flush remote SHA cache
+		// Detect first-time baseline establishment so we can inform the user.
+		$hadBaselines = $trackingEnabled && $this->checker->hasGitHubBaseline();
+
+		// Force fresh module SHA data when tracking is enabled.
 		$this->checker->clearTemporaryRemoteShaCache();
+		$this->checker->getVersions(true, $trackingEnabled);
 
-		// Fetch fresh core branches + module versions
-		$checkSha = (bool) $this->session->getFor($this, 'githubTrackingEnabled');
-		$this->checker->getVersions(true, $checkSha);
+		if($trackingEnabled) {
+			$this->cache->save($this->cacheKey('lastGithubRefreshTime'), (string) time(), $this->cacheTtl('lastGithubRefreshTime'));
 
-		// Clear loginHook so the next login re-fetches fresh upgrade data
+			// Inform the user on first initialization — future refreshes will detect changes.
+			if(!$hadBaselines) {
+				$this->message($this->_('GitHub tracking was initialized. Future refreshes will detect repository changes.'), true);
+			}
+		}
+
 		$this->cache->delete($this->cacheKey('loginHook'));
 
-		// Retrieve and display any GitHub API warning
 		$warning = $this->checker->getGitHubRefreshWarning();
 		if($warning !== '') {
 			$this->warning($warning, true);
@@ -541,38 +595,22 @@ class ProcessWireUpgrade extends Process {
 
 		$this->message($this->_('Refreshed core and modules list.'), true);
 		$elapsed = Debug::stopTimer($timer);
-		$this->log('Refresh Core & Modules List finished; elapsed=' . $elapsed);
+		$this->log('Refresh Core & Modules List finished; moduleGitHubTracking=' . ($trackingEnabled ? 'yes' : 'no') . '; elapsed=' . $elapsed);
 		$this->session->location('./');
 	}
 
 	/**
-	 * Check GitHub latest commits for installed and optionally uninstalled modules.
+	 * Build a module-download URL for the given module name, repo, and optional SHA
+	 *
+	 * @param string $name Module class name
+	 * @param string $repo GitHub repository URL
+	 * @param string $sha  Optional commit SHA for pinning the archive
+	 * @return string URL relative to the module's admin page
 	 */
-	public function executeGithubRefresh(): void {
-		$this->debug('Check GitHub for updates started.');
-		$timer = Debug::startTimer();
-		$this->session->setFor($this, 'lastGithubRefreshTime', time());
-		$this->session->setFor($this, 'githubTrackingEnabled', true);
-
-		// Flush the remote SHA cache so module SHAs are re-fetched.
-		// (getVersions($refresh=true) already bypasses the branches cache
-		// internally, so no explicit branches delete is needed.)
-		$this->checker->clearTemporaryRemoteShaCache();
-		$this->checker->getVersions(false, true);
-
-		// Clear loginHook so the next login re-fetches fresh upgrade data
-		$this->cache->delete($this->cacheKey('loginHook'));
-
-		// Retrieve and display any GitHub API warning
-		$warning = $this->checker->getGitHubRefreshWarning();
-		if($warning !== '') {
-			$this->warning($warning, true);
-		}
-
-		$this->message($this->_('Checked GitHub for updates.'), true);
-		$elapsed = Debug::stopTimer($timer);
-		$this->log('Check GitHub for updates finished; elapsed=' . $elapsed);
-		$this->session->location('./');
+	private function moduleDownloadUrl(string $name, string $repo, string $sha = ''): string {
+		$url = './module-download?name=' . urlencode($name) . '&repo=' . urlencode($repo);
+		if($sha !== '') $url .= '&sha=' . urlencode($sha);
+		return $url;
 	}
 
 	/**
@@ -615,24 +653,9 @@ class ProcessWireUpgrade extends Process {
 			$downloadDestinationDir = $realModulePath;
 		}
 
-		$this->log(sprintf(
-			'Symlink debug: name=%s; preserveSymlinks=%d; realModulePath=%s; downloadDestinationDir=%s',
-			$name,
-			$preserveSymlinks ? 1 : 0,
-			$realModulePath !== false ? $realModulePath : '(none)',
-			$downloadDestinationDir !== '' ? $downloadDestinationDir : '(auto)'
-		));
-
 		/** @var ProcessModule $processModule */
 		$processModule = $modules->get('ProcessModule');
 		$destinationDir = $processModule->installer()->downloadModule($zipUrl, $downloadDestinationDir);
-
-		$this->log(sprintf(
-			'Symlink debug result: name=%s; destinationDir=%s; realModulePath=%s',
-			$name,
-			$destinationDir !== false && $destinationDir !== '' ? $destinationDir : 'false',
-			$realModulePath !== false ? $realModulePath : '(none)'
-		));
 
 		if($destinationDir) {
 			$msg = $realModulePath !== false
@@ -678,10 +701,7 @@ class ProcessWireUpgrade extends Process {
 			}
 		}
 
-		// Preserve GitHub tracking state — user didn't ask to reset it
-		$trackingEnabled = $this->session->getFor($this, 'githubTrackingEnabled');
 		$this->session->removeAllFor($this);
-		if($trackingEnabled) $this->session->setFor($this, 'githubTrackingEnabled', true);
 
 		$this->session->location('./');
 	}
@@ -755,13 +775,18 @@ class ProcessWireUpgrade extends Process {
 		$branch = $this->getBranch();
 		if(empty($branch)) $this->abort($this->_('No branch selected.'));
 
-		$branchName = $branch['name'];
-		$branchVersion = $branch['version'];
-		$branchZipURL = $branch['zipURL'];
+		$branchName = $this->toString($branch['name'] ?? '');
+		$branchVersion = $this->toString($branch['version'] ?? '');
+		$branchZipURL = $this->toString($branch['zipURL'] ?? '');
+		$branchSha = $this->toString($branch['sha'] ?? '');
+
+		if($branchSha !== '') {
+			$branchZipURL = rtrim(ProcessWireUpgradeCheck::GH_GIT_BASE . ProcessWireUpgradeCheck::REPO, '/') . '/archive/' . $branchSha . '.zip';
+		}
 
 		if($branchName === '' || $branchVersion === '' || $branchZipURL === '') $this->abort($this->_('No branch selected.'));
 
-		$this->debug("Core download started; branch=$branchName; version=$branchVersion");
+		$this->debug("Core download started; branch=$branchName; version=$branchVersion; sha=" . ($branchSha !== '' ? substr($branchSha, 0, 7) : '(none)'));
 
 		wireMkdir($this->tempPath);
 		$http = new WireHttp();
@@ -989,28 +1014,23 @@ class ProcessWireUpgrade extends Process {
 			$indexNewFile = $cacheUpgradePath . 'index.php';
 		}
 
-		// Prevent stale prepared artifacts from a previous run from being reused silently.
-		// renameNow() returns success when the destination already exists, so without this
-		// guard the freshly extracted files could be discarded and temp files removed.
-		$existingPreparedTargets = [];
-		if(file_exists($wireNewPath)) $existingPreparedTargets[] = $wireNewPath;
-		if(file_exists($indexNewFile)) $existingPreparedTargets[] = $indexNewFile;
-		if(file_exists($htaccessNewFile)) $existingPreparedTargets[] = $htaccessNewFile;
-		if(!empty($existingPreparedTargets)) {
-			$labels = [];
-			foreach($existingPreparedTargets as $path) {
-				$labels[] = str_replace($config->paths->root, '/', $path);
-			}
-			$this->abort(
-				$this->_('Existing prepared upgrade files were found. Remove them first and run Prepare again to avoid using stale files.') .
-				' ' . implode(', ', $labels)
-			);
+		// Remove prepared files left by an earlier run with the same versioned names.
+		// This is required for same-version dev SHA syncs, where the prepared paths
+		// remain unchanged even though the downloaded commit is newer.
+		if(is_dir($wireNewPath) && !wireRmdir($wireNewPath, true)) {
+			$this->abort($this->_('Unable to replace existing prepared directory:') . ' ' . $wireNewPath);
+		}
+		if(is_file($indexNewFile) && !unlink($indexNewFile)) {
+			$this->abort($this->_('Unable to replace existing prepared file:') . ' ' . $indexNewFile);
+		}
+		if(is_file($htaccessNewFile) && !unlink($htaccessNewFile)) {
+			$this->abort($this->_('Unable to replace existing prepared file:') . ' ' . $htaccessNewFile);
 		}
 
-		// renameNow() aborts internally on wire failure (fatal).
-		// index.php/htaccess.txt rename failures leave old files in place — safe to continue and clean up temp.
+		// renameNow() aborts on failure for wire and index.php (both required=true, fatal).
+		// htaccess.txt rename failure leaves the old file in place — safe to continue and clean up temp.
 		$this->renameNow($wireTempPath, $wireNewPath);
-		$this->renameNow($rootTempPath . "index.php", $indexNewFile, false);
+		$this->renameNow($rootTempPath . "index.php", $indexNewFile);
 		$this->renameNow($rootTempPath . "htaccess.txt", $htaccessNewFile, false);
 
 		// remove /temp/path/ as no longer needed since we've taken everything we need out of it above
@@ -1051,7 +1071,6 @@ class ProcessWireUpgrade extends Process {
 		$out .= $this->ul($items);
 
 		if($rootWritable) {
-
 			$htaccessNote = '';
 			if(!$htaccessIsOk) {
 				$htaccessNote = $this->_('Since the `.htaccess` file can often have site-specific customizations, it would be best to handle that one manually, unless you know it is unmodified.');
@@ -1178,13 +1197,26 @@ class ProcessWireUpgrade extends Process {
 			$this->renameLater($rootPath . $old, $rootPath . $new);
 		}
 
+		// Defer core dev SHA baseline save to __destruct() so it only commits
+		// after all deferred renames succeed. If renames fail, the baseline
+		// is not advanced and Sync will appear again on next check.
+		$branchName = $this->toString($branch['name'] ?? '');
+		$branchSha = $this->toString($branch['sha'] ?? '');
+		if(
+			$branchName === ProcessWireUpgradeCheck::BRANCH_DEV &&
+			$branchSha !== '' &&
+			in_array('wire', $selected, true)
+		) {
+			$this->pendingCoreDevSha = ['sha' => $branchSha, 'version' => $newVersion];
+		}
+
 		// Clear the session version cache so the redirect back to ./ picks up the
 		// newly installed version from $config->version instead of the stale pre-install data.
 		$this->checker->clearVersionListCache();
-		$this->log("Core upgrade completed; old=$oldVersion; new=$newVersion; components=" . implode(',', $selected));
+		$this->log("Core upgrade scheduled; old=$oldVersion; new=$newVersion; components=" . implode(',', $selected));
 
 		$out =
-			$this->h('Upgrade completed') .
+			$this->h('Upgrade scheduled') .
 			$this->p($this->b('Double check that everything works before you leave this page')) .
 			$this->completionNotes();
 
@@ -1236,7 +1268,7 @@ class ProcessWireUpgrade extends Process {
 	 * @param string $name module name (class name)
 	 */
 	public function refreshSingleModule(string $name): void {
-		$info = $this->modules->getModuleInfoVerbose($name, ['forceNew' => true]);
+		$info = $this->modules->getModuleInfoVerbose($name, ['noCache' => true]);
 
 		// Clear SHA baseline so the checker re-establishes it on next run
 		$localVersion = $this->toString($info['versionStr'] ?? '');
@@ -1352,11 +1384,6 @@ class ProcessWireUpgrade extends Process {
 			return false;
 		}
 
-		if(file_exists($new)) {
-			$this->message("$_new already exists (left it untouched)", true);
-			return true;
-		}
-
 		// files->rename() method will copy the files if rename fails, it will also log errors, since 3.0.178
 		$result = $this->files->rename($old, $new);
 
@@ -1365,7 +1392,7 @@ class ProcessWireUpgrade extends Process {
 			return true;
 		} else {
 			$this->error(sprintf($this->_('Unable to rename %s to %s'), $_old, $_new), true);
-			if(basename(rtrim($new, '/')) === 'wire') {
+			if($required) {
 				$this->abort(sprintf($this->_('Upgrade aborted. Unable to rename %s to %s'), $_old, $_new));
 			}
 			return false;
@@ -1383,44 +1410,10 @@ class ProcessWireUpgrade extends Process {
 	}
 
 	/**
-	 * Creates and returns a configured "Refresh" button instance.
-	 *
-	 * @param bool $showInHeader Whether to display the button in the header (if supported by the Inputfield)
-	 * @return InputfieldButton Configured refresh button
-	 */
-	protected function refreshButton($showInHeader = false): InputfieldButton {
-		/** @var InputfieldButton $btn */
-		$btn = $this->modules->get('InputfieldButton');
-		$btn->href = './refresh';
-		$btn->value = $this->_('Refresh Core & Modules List');
-		$btn->icon = 'refresh';
-		$btn->attr('title', $this->_('Reloads the list of installed modules and core version from disk. Use this if you have added, removed, or updated files manually.'));
-		$btn->attr('onclick', "this.querySelector('i').className='fa fa-spinner fa-spin';this.style.pointerEvents='none';this.style.opacity='0.6'");
-		if($showInHeader && method_exists($btn, 'showInHeader')) $btn->showInHeader(true);
-		return $btn;
-	}
-
-	/**
-	 * Creates and returns a configured "Check GitHub for Updates" button instance.
-	 *
-	 * @param bool $showInHeader Whether to display the button in the header (if supported by the Inputfield)
-	 * @param string $label Optional custom label
-	 * @return InputfieldButton
-	 */
-	protected function githubCheckButton(bool $showInHeader = false, string $label = ''): InputfieldButton {
-		/** @var InputfieldButton $btn */
-		$btn = $this->modules->get('InputfieldButton');
-		$btn->href = './github-refresh';
-		$btn->value = $label !== '' ? $label : $this->_('Check GitHub for Updates');
-		$btn->icon = 'github';
-		$btn->attr('title', $this->_('Fetches the latest commit and version information for modules and core from GitHub. Use this to check for new releases or updates.'));
-		$btn->attr('onclick', "this.querySelector('i').className='fa fa-spinner fa-spin';this.style.pointerEvents='none';this.style.opacity='0.6'");
-		if($showInHeader && method_exists($btn, 'showInHeader')) $btn->showInHeader(true);
-		return $btn;
-	}
-
-	/**
 	 * Returns information about the last refresh time and the data source used.
+	 *
+	 * Shows when the module list was last refreshed, core dev branch auto-check
+	 * status, and (when active) when module GitHub tracking was last run.
 	 *
 	 * @param bool $paragraph Whether to wrap the output in a <p> element
 	 * @return string HTML with last refresh details
@@ -1435,14 +1428,13 @@ class ProcessWireUpgrade extends Process {
 		$lastRefresh = $lastRefreshStr !== '' ? wireRelativeTimeStr($lastRefreshStr) : $na;
 		$sentences[] = sprintf($this->_('Last refresh: %s.'), $lastRefresh);
 
-		// GH check time
-		if($this->session->getFor($this, 'githubTrackingEnabled')) {
-			$githubRefreshRaw = $this->session->getFor($this, 'lastGithubRefreshTime');
+		if((bool) $this->checker->githubTrackingEnabled) {
+			$githubRefreshRaw = $this->cache->get($this->cacheKey('lastGithubRefreshTime'));
 			$githubRefreshStr = $this->toString($githubRefreshRaw);
 			$githubRefresh = $githubRefreshStr !== '' ? wireRelativeTimeStr($githubRefreshStr) : $na;
-			$sentences[] = sprintf($this->_('GitHub check: %s.'), $githubRefresh);
+			$sentences[] = sprintf($this->_('Module GitHub check: %s.'), $githubRefresh);
 		} else {
-			$sentences[] = sprintf($this->_('GitHub check: %s.'), $na);
+			$sentences[] = sprintf($this->_('Module GitHub check: %s.'), $na);
 		}
 
 		// Module repo info
@@ -1478,7 +1470,6 @@ class ProcessWireUpgrade extends Process {
 		$requiresRollback = false;
 
 		foreach($pendingRenames as $oldPath => $newPath) {
-
 			// Handle collision: move existing target out of the way
 			if(file_exists($newPath)) {
 				$n = 0;
@@ -1513,6 +1504,22 @@ class ProcessWireUpgrade extends Process {
 				break;
 			}
 		}
+
+		// Commit core dev SHA baseline only after all deferred renames succeeded
+		if(!$requiresRollback && $this->pendingCoreDevSha !== null) {
+			$sha = $this->pendingCoreDevSha['sha'];
+			$version = $this->pendingCoreDevSha['version'];
+			$shaKey = $this->cacheKey('installedCoreDevSha', $version);
+			$this->cache->save($shaKey, $sha, $this->cacheTtl('installedCoreDevSha'));
+			$this->debug('Updated core dev SHA baseline after install; version=' . $version . '; sha=' . substr($sha, 0, 7));
+		}
+
+		// Log successful filesystem operations for any completed core upgrade
+		if(!$requiresRollback) {
+			$this->log('Core upgrade filesystem operations completed successfully.');
+		}
+
+		$this->pendingCoreDevSha = null;
 
 		// Centralized LIFO rollback execution
 		if($requiresRollback && !empty($executed)) {
@@ -1581,8 +1588,7 @@ class ProcessWireUpgrade extends Process {
 			$this->statPill($labelCounts['Upgrade'], $this->_('upgrade'), true) .
 			$this->statPill($labelCounts['Download'], $this->_('download'), true) .
 			$this->statPill($labelCounts['Sync'], $this->_('sync'), true) .
-			$this->statPill($upToDate, $this->_('up-to-date'), false) .
-			'';
+			$this->statPill($upToDate, $this->_('up-to-date'), false);
 
 		if(!empty($pwDebug) && $labelCounts['Managed by'] > 0) {
 			$pills .= $this->statPill($labelCounts['Managed by'], $this->_('managed'), false);
@@ -1604,19 +1610,86 @@ class ProcessWireUpgrade extends Process {
 	 * @param string $label Label text displayed next to the checkbox
 	 * @param string $note Optional note displayed alongside the label (can contain HTML)
 	 * @param bool $checked Whether the checkbox should be pre-checked
+	 * @param string $id Optional id attribute for the input element
 	 * @return string Rendered HTML for the checkbox element
 	 */
-	public function checkbox(string $name, string $label, string $note = '', bool $checked = false): string {
+	public function checkbox(string $name, string $label, string $note = '', bool $checked = false, string $id = ''): string {
 		$adminTheme = $this->wire()->adminTheme;
 
 		$checkboxClass = $this->toString($adminTheme ? $adminTheme->getClass('input-checkbox') : '');
 		$checkedAttr = $checked ? ' checked="checked"' : '';
+		$idAttr = $id !== '' ? " id='" . htmlspecialchars($id, ENT_QUOTES, 'UTF-8') . "'" : '';
 
 		$safeName  = htmlspecialchars($name, ENT_QUOTES, 'UTF-8');
 		$safeLabel = htmlspecialchars($label, ENT_QUOTES, 'UTF-8');
 		$noteHtml = $note !== '' ? $this->span($note, 'detail') : '';
 
-		return "<div><label><input type='checkbox' class='$checkboxClass' name='$safeName' value='1'$checkedAttr> $safeLabel $noteHtml</label></div>";
+		return "<div><label><input type='checkbox' class='$checkboxClass' name='$safeName' value='1'$checkedAttr$idAttr> $safeLabel $noteHtml</label></div>";
+	}
+
+	/**
+	 * Determine whether any child module of $item has a pending update.
+	 *
+	 * Used to promote a parent row to Upgrade/Sync when a child needs one.
+	 * Shared by execute() and itemSortPriority() so the two never drift.
+	 *
+	 * @param array<string, mixed> $item
+	 * @return bool
+	 */
+	private function childNeedsUpdate(array $item): bool {
+		if(empty($item['childModules']) || !is_array($item['childModules'])) return false;
+		foreach($item['childModules'] as $childData) {
+			if(!is_array($childData)) continue;
+			$childNew = (int) $this->toString($childData['new'] ?? '');
+			if($childNew > 0) return true;
+		}
+		return false;
+	}
+
+	/**
+	 * Determine the table sort priority for a version item.
+	 *
+	 * Lower numbers sort first:
+	 * 0 = Upgrade, 1 = Sync, 2 = Download, 3 = Unavailable, 4 = Other
+	 *
+	 * @param array<string, mixed> $item
+	 * @return int
+	 */
+	private function itemSortPriority(array $item): int {
+		$new = $item['new'] ?? 0;
+
+		// Promote parents when a child has an upgrade available.
+		// Mirrors execute(): only promote when the parent is not already ahead
+		// of the remote version ($new >= 0), so a local-ahead parent with a
+		// child update is not sorted as an Upgrade while showing "Up-to-date+".
+		if($new >= 0 && $this->childNeedsUpdate($item)) {
+			$new = 1;
+		}
+
+		if($new <= 0) return 4;
+
+		// Core branches always map to Upgrade.
+		if(!empty($item['branch'])) return 0;
+
+		$installed = (bool) ($item['installed'] ?? false);
+		$urls = (isset($item['urls']) && is_array($item['urls'])) ? $item['urls'] : [];
+		$repo = $this->toString($urls['repo'] ?? '');
+
+		if(!$installed) {
+			return $repo !== '' ? 2 : 3;
+		}
+
+		$sha = $this->toString($item['sha'] ?? '');
+		if($sha === '') {
+			return 0;
+		}
+
+		$remote = $this->toString($item['remote'] ?? '');
+		$local = $this->toString($item['local'] ?? '');
+		$cleanRemote = (string) preg_replace('/\s*\([0-9a-f]{7,}\)\s*$/', '', $remote);
+		$isVersionUpgrade = $remote !== '' && $local !== '' && version_compare($cleanRemote, $local) > 0;
+
+		return $isVersionUpgrade ? 0 : 1;
 	}
 
 	/**

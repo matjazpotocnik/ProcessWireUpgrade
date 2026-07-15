@@ -18,9 +18,8 @@ span.links {
 	text-decoration: line-through;
 	opacity: .8;
 }
-span.xis_child {
-	padding-left: 24px;
-	font-size: 0.95em;
+span.is_child i {
+	margin-right: 5px;
 }
 p.last-refresh-info {
 	margin-top:0;
@@ -38,32 +37,23 @@ p.help-text {
 	clip: rect(0,0,0,0);
 	border: 0;
 }
-/*
-p.summary {}
-p .summary-count {}
-*/
+
 .pw-upgrade-stats {
 	display: flex;
 	flex-wrap: wrap;
 	gap: 8px;
 	margin: 0.75rem 0;
 }
-
 .pw-upgrade-stats .stat-pill {
 	display: inline-flex;
 	align-items: center;
 	padding: 4px 12px;
 	border-radius: var(--pw-button-radius, 999px);
-	/*font-size: 13px;
-	font-weight: 500;
-	line-height: 1.4;*/
 }
-
 .pw-upgrade-stats .stat-pill.pw-bg-main-color {
 	background: var(--pw-main-color, #c0317d);
 	color: var(--pw-blocks-background, #fff);
 }
-
 .pw-upgrade-stats .stat-pill.is-muted {
 	background: transparent;
 	border: 1px solid var(--pw-border-color, #ddd);
@@ -75,4 +65,29 @@ tr.local-only {
 }
 tr.local-only td {
 	font-style: italic;
+}
+
+.ProcessWireUpgradeHeaderControls {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-end;
+	gap: .5rem;
+}
+.pw-github-tracking-row {
+	margin: .5rem 0 0;
+}
+.pw-github-tracking-row label {
+	display: inline-flex;
+	align-items: center;
+	gap: .5rem;
+}
+.pw-github-tracking-row input,
+ .ProcessWireUpgradeGithubTrackingHeader input {
+	vertical-align: middle;
+	margin-top: 0;
+}
+.ProcessWireUpgradeGithubTrackingHeader {
+	display: inline-flex;
+	align-items: center;
+	gap: .5rem;
 }

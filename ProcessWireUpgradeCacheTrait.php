@@ -67,6 +67,18 @@ trait ProcessWireUpgradeCacheTrait {
 			'ttl' => WireCache::expireNever,
 		],
 
+		// SHA baseline for installed ProcessWire core dev branch by local version
+		'installedCoreDevSha' => [
+			'key' => 'installedCoreDevSha_%s',
+			'ttl' => WireCache::expireNever,
+		],
+
+		// Timestamp of the last "Check GitHub for Updates" click (persistent across sessions)
+		'lastGithubRefreshTime' => [
+			'key' => 'lastGithubRefreshTime',
+			'ttl' => WireCache::expireNever,
+		],
+
 	];
 
 	/**
